@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Mic, MicOff, Send, Volume2, VolumeX, Copy, Check, Maximize2, Minimize2, RotateCcw, AlertCircle } from 'lucide-react';
+import { Sparkles, Mic, MicOff, Send, Volume2, VolumeX, Copy, Check, RotateCcw, AlertCircle, Radio } from 'lucide-react';
 import { UserPreferences, VoiceCommandAction } from '../types/assistant';
 import { speechService } from '../services/speechService';
 import { AudioWaveform } from './AudioWaveform';
@@ -8,6 +8,7 @@ interface TouchKioskViewProps {
   onSendMessage: (text: string) => void;
   latestResponse: string;
   isProcessing: boolean;
+  isSpeaking?: boolean;
   statusText: string;
   preferences: UserPreferences;
   latencyMs?: number;
@@ -15,12 +16,14 @@ interface TouchKioskViewProps {
   isContinuousListening?: boolean;
   isAwake?: boolean;
   onVoiceCommand?: (action: VoiceCommandAction) => void;
+  onToggleContinuousListening?: () => void;
 }
 
 export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
   onSendMessage,
   latestResponse,
   isProcessing,
+  isSpeaking = false,
   statusText,
   preferences,
   latencyMs,
@@ -28,12 +31,11 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
   isContinuousListening,
   isAwake,
   onVoiceCommand,
+  onToggleContinuousListening,
 }) => {
   const [inputText, setInputText] = useState('');
   const [isListening, setIsListening] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [isFullscreenKiosk, setIsFullscreenKiosk] = useState(false);
   const [speechError, setSpeechError] = useState<string | null>(null);
 
   const responseScrollRef = useRef<HTMLDivElement>(null);
@@ -46,8 +48,26 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
     }
   }, [latestResponse]);
 
-  // Handle voice mic toggle
+  // Handle voice mic toggle with smart collision handling and barge-in
   const toggleListening = async () => {
+    // 1. If assistant is speaking, clicking the mic immediately cuts off the speech (barge-in)
+    if (isSpeaking) {
+      speechService.stopSpeaking();
+      return;
+    }
+
+    // 2. If continuous listening is enabled: clicking the mic wakes up the assistant directly
+    if (isContinuousListening) {
+      if (isAwake) {
+        speechService.setAwakeState(false);
+      } else {
+        speechService.setAwakeState(true);
+        speechService.playChime('wake');
+      }
+      return;
+    }
+
+    // 3. Manual one-shot listening
     if (isListening) {
       speechService.stopListening();
       setIsListening(false);
@@ -88,19 +108,15 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
     }
   };
 
-  // Play audio TTS
+  // Play/stop audio TTS
   const toggleSpeechAudio = () => {
     if (isSpeaking) {
       speechService.stopSpeaking();
-      setIsSpeaking(false);
     } else {
       if (!latestResponse) return;
-      setIsSpeaking(true);
       speechService.speak(latestResponse, {
         rate: preferences.speechRate,
         volume: preferences.volume ?? 1,
-        onStart: () => setIsSpeaking(true),
-        onEnd: () => setIsSpeaking(false),
       });
     }
   };
@@ -127,10 +143,10 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
   };
 
   const samplePrompts = [
-    '¿Cómo estás hoy?',
+    '¿Qué hora es?',
     'Dame 3 ideas para cenar rápido y saludable',
     'Explícame la teoría de la relatividad en breve',
-    'Consejos para mejorar mi concentración',
+    'Cuéntame un dato curioso sobre el espacio',
   ];
 
   return (
@@ -178,14 +194,16 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
               </p>
             ) : (
               <p className="text-[13px] text-slate-400 italic tracking-wide">
-                {isListening
-                  ? 'Escuchando... Di tu consulta ahora'
-                  : isProcessing
-                  ? 'Procesando respuesta en tiempo real...'
+                {isSpeaking
+                  ? 'Hablando en tiempo real · Di "Silencio" o toca el micro para parar'
                   : isAwake
-                  ? `¡Te escucho! Di tu consulta...`
-                  : preferences.continuousListening && statusText === 'Listo'
-                  ? `Escucha continua activa · Di "Hola ${preferences.assistantName}"`
+                  ? `¡Te escucho! Di tu pregunta ahora...`
+                  : isListening
+                  ? 'Escuchando voz... Habla ahora'
+                  : isProcessing
+                  ? 'Generando respuesta en tiempo real...'
+                  : isContinuousListening
+                  ? `Di "Hola ${preferences.assistantName}" para despertar`
                   : statusText || 'Listo'}
               </p>
             )}
@@ -198,8 +216,44 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
           </div>
         </div>
 
-        {/* 3. Caja de Respuestas Elevada */}
-        <div className="w-full max-w-[600px] mt-2 mb-1 z-10">
+        {/* 3. Hands-Free Wake Word Interactive Banner */}
+        <div className="w-full max-w-[600px] mb-3 z-10 flex items-center justify-between px-3.5 py-2 rounded-2xl bg-slate-950/80 border border-slate-800 text-xs shadow-inner">
+          <div className="flex items-center gap-2.5">
+            <div
+              className={`w-2.5 h-2.5 rounded-full transition-all ${
+                isAwake
+                  ? 'bg-rose-500 animate-ping'
+                  : isContinuousListening
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-slate-600'
+              }`}
+            />
+            <span className="text-slate-300 font-medium">
+              {isAwake
+                ? '¡Asistente despierto! Escuchando consulta...'
+                : isContinuousListening
+                ? `Manos libres activo · Di "Hola ${preferences.assistantName}"`
+                : 'Modo Manos Libres apagado'}
+            </span>
+          </div>
+
+          {onToggleContinuousListening && (
+            <button
+              onClick={onToggleContinuousListening}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-[11px] font-semibold transition-all ${
+                isContinuousListening
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20'
+                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/20'
+              }`}
+            >
+              <Radio className="w-3 h-3" />
+              <span>{isContinuousListening ? 'Pausar' : 'Activar Manos Libres'}</span>
+            </button>
+          )}
+        </div>
+
+        {/* 4. Caja de Respuestas Elevada */}
+        <div className="w-full max-w-[600px] mt-1 mb-1 z-10">
           <div
             ref={responseScrollRef}
             className="w-full min-h-[160px] max-h-[220px] bg-slate-950/80 border border-slate-800/80 rounded-2xl p-5 overflow-y-auto flex flex-col justify-start relative shadow-inner transition-all focus:outline-none scroll-smooth"
@@ -210,7 +264,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
                 <span className="text-white">{latestResponse}</span>
               ) : (
                 <span className="text-slate-500 italic">
-                  Las respuestas aparecerán aquí. Presiona el micrófono para hablar o escribe en el campo inferior.
+                  Las respuestas aparecerán aquí. Di "Hola Asistente" para hablar en tiempo real.
                 </span>
               )}
             </div>
@@ -220,8 +274,8 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
           {latestResponse && (
             <div className="flex items-center justify-between px-2 pt-2.5 pb-1">
               <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
-                <span>{isSpeaking ? 'Reproduciendo audio...' : 'Respuesta del Asistente'}</span>
+                <span className={`w-1.5 h-1.5 rounded-full ${isSpeaking ? 'bg-rose-400 animate-ping' : 'bg-blue-400'}`} />
+                <span>{isSpeaking ? 'Reproduciendo voz en tiempo real...' : 'Respuesta del Asistente'}</span>
               </div>
 
               <div className="flex items-center gap-2">
@@ -229,13 +283,13 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
                   onClick={toggleSpeechAudio}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-medium transition-all shadow-sm ${
                     isSpeaking
-                      ? 'bg-blue-600 text-white border-blue-500 animate-pulse'
+                      ? 'bg-rose-600 text-white border-rose-500 shadow-rose-600/30 animate-pulse'
                       : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700 hover:text-white'
                   }`}
-                  title={isSpeaking ? 'Detener voz' : 'Escuchar respuesta por voz'}
+                  title={isSpeaking ? 'Interrumpir voz' : 'Escuchar respuesta por voz'}
                 >
                   {isSpeaking ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-blue-400" />}
-                  <span>{isSpeaking ? 'Detener voz' : 'Escuchar voz'}</span>
+                  <span>{isSpeaking ? 'Silenciar voz' : 'Escuchar voz'}</span>
                 </button>
 
                 <button
@@ -260,31 +314,37 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
           )}
         </div>
 
-        {/* 4. Barra de Interacción Inferior */}
-        <div className="w-full max-w-[600px] flex items-center gap-2.5 mt-1 z-10">
+        {/* 5. Barra de Interacción Inferior */}
+        <div className="w-full max-w-[600px] flex items-center gap-2.5 mt-2 z-10">
           {/* Botón táctil de micrófono */}
           <button
             onClick={toggleListening}
             className={`w-[50px] h-[50px] rounded-2xl flex items-center justify-center transition-all duration-200 shrink-0 touch-target focus:outline-none focus:ring-2 focus:ring-blue-400/50 relative ${
-              isListening || isAwake
+              isSpeaking
+                ? 'bg-rose-600 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse'
+                : isListening || isAwake
                 ? 'bg-rose-600 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)] scale-105 ring-4 ring-rose-500/20'
                 : isContinuousListening
                 ? 'bg-slate-800/90 border border-emerald-500/50 text-emerald-400 hover:bg-slate-700 active:scale-95'
                 : 'bg-slate-800 border border-slate-700 text-blue-400 hover:bg-slate-700 active:scale-95'
             }`}
             title={
-              isListening || isAwake
+              isSpeaking
+                ? 'Asistente hablando · Clic para silenciar (Barge-in)'
+                : isListening || isAwake
                 ? 'Escuchando voz activa'
                 : isContinuousListening
-                ? 'Escucha Continua Activa'
+                ? 'Manos Libres Activo · Clic para despertar'
                 : 'Hablar por micrófono'
             }
             aria-label="Micrófono"
           >
-            {isContinuousListening && !isListening && !isAwake && (
+            {isContinuousListening && !isListening && !isAwake && !isSpeaking && (
               <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400" />
             )}
-            {isListening || isAwake ? (
+            {isSpeaking ? (
+              <VolumeX className="w-6 h-6 animate-pulse text-white" />
+            ) : isListening || isAwake ? (
               <MicOff className="w-6 h-6 animate-pulse" />
             ) : (
               <Mic className="w-6 h-6" />
@@ -300,7 +360,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={isProcessing}
-              placeholder="Escribe tu consulta aquí..."
+              placeholder="Escribe tu consulta o di 'Hola Asistente'..."
               className="w-full h-[50px] bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-2xl px-4 text-[15px] text-white placeholder-slate-500 outline-none transition-all duration-200 disabled:opacity-50 shadow-inner"
             />
             {inputText && (
@@ -314,7 +374,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
             )}
           </div>
 
-          {/* Botón "Enviar" con icono y texto en color azul vibrante */}
+          {/* Botón "Enviar" */}
           <button
             onClick={handleSend}
             disabled={!inputText.trim() || isProcessing}

@@ -17,7 +17,7 @@ const DEFAULT_PREFERENCES: UserPreferences = {
   speechRate: 1.05,
   theme: 'dark',
   kioskScale: 1.0,
-  continuousListening: false,
+  continuousListening: true, // Default enabled for hands-free "Hola Asistente"
   wakeWordSound: true,
   volume: 1.0,
 };
@@ -26,9 +26,10 @@ export default function App() {
   const [viewMode, setViewMode] = useState<AppViewMode>('kiosk_touch');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [latestResponse, setLatestResponse] = useState<string>(
-    '¡Hola! Soy tu Asistente IA. Estoy listo para escucharte y responderte en tiempo real.'
+    '¡Hola! Soy tu Asistente IA. Di "Hola Asistente" o presiona el micrófono para hablarme en tiempo real.'
   );
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [statusText, setStatusText] = useState<string>('Listo');
   const [lastLatencyMs, setLastLatencyMs] = useState<number | undefined>(undefined);
   const [lastTtftMs, setLastTtftMs] = useState<number | undefined>(undefined);
@@ -45,6 +46,8 @@ export default function App() {
           ...DEFAULT_PREFERENCES,
           ...parsed,
           volume: parsed.volume !== undefined ? parsed.volume : 1.0,
+          // Always keep continuousListening enabled by default unless explicitly disabled
+          continuousListening: parsed.continuousListening !== undefined ? parsed.continuousListening : true,
         };
       }
     } catch (e) {
@@ -57,6 +60,13 @@ export default function App() {
   useEffect(() => {
     speechService.setVolume(preferences.volume ?? 1.0);
   }, [preferences.volume]);
+
+  // Hook speaking state callback
+  useEffect(() => {
+    speechService.setSpeakingStateCallback((speaking) => {
+      setIsSpeaking(speaking);
+    });
+  }, []);
 
   // Save preferences
   useEffect(() => {
@@ -77,7 +87,6 @@ export default function App() {
       root.classList.remove('dark');
       root.style.backgroundColor = '#F8FAFC';
     } else {
-      // Auto: based on media query or system hour (7pm - 7am = dark)
       const hour = new Date().getHours();
       const isNight = hour >= 19 || hour < 7;
       const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -95,9 +104,12 @@ export default function App() {
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleSendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || isProcessing) return;
+    if (!text.trim()) return;
 
-    // Abort previous if active
+    // ── ANTI-COLLISION & BARGE-IN ──────────────────────────────────────────
+    // Stop any ongoing speech or prior fetch request immediately so voices don't overlap
+    speechService.stopSpeaking();
+
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -122,13 +134,14 @@ export default function App() {
 
     setMessages((prev) => [...prev, userMessage, initialModelMessage]);
     setIsProcessing(true);
-    setStatusText('Procesando respuesta...');
+    setStatusText('Generando respuesta en tiempo real...');
     setLatestResponse('');
 
     let accumulatedText = '';
+    let speechStreamBuffer = '';
 
-    // History for multi-turn
-    const conversationHistory = messages.map((m) => ({
+    // History for multi-turn (last 6 items)
+    const conversationHistory = messages.slice(-6).map((m) => ({
       role: m.role,
       text: m.text,
     }));
@@ -150,6 +163,27 @@ export default function App() {
                 : msg
             )
           );
+
+          // ── REAL-TIME SENTENCE STREAMING SPEECH SYNTHESIS ──
+          // As Groq streams chunks, detect sentence boundaries (. ? ! \n :)
+          // and start speaking the completed sentence immediately without waiting!
+          if (preferences.autoSpeak) {
+            speechStreamBuffer += chunk;
+
+            // Match full sentence up to punctuation mark
+            const match = speechStreamBuffer.match(/^([\s\S]*?[.?!:\n]+(?:\s+|$))([\s\S]*)$/);
+            if (match) {
+              const sentenceToSpeak = match[1].trim();
+              speechStreamBuffer = match[2];
+
+              if (sentenceToSpeak && sentenceToSpeak.length > 2) {
+                speechService.enqueueStreamSpeech(sentenceToSpeak, {
+                  rate: preferences.speechRate,
+                  volume: preferences.volume ?? 1.0,
+                });
+              }
+            }
+          }
         },
         onFirstToken: (ttftMs: number) => {
           setLastTtftMs(ttftMs);
@@ -159,6 +193,15 @@ export default function App() {
           setLastLatencyMs(metrics.totalDurationMs);
           setLastTtftMs(metrics.ttftMs);
           setStatusText(`Listo · ${metrics.totalDurationMs}ms`);
+
+          // Flush any trailing speech words in the buffer
+          if (preferences.autoSpeak && speechStreamBuffer.trim()) {
+            speechService.enqueueStreamSpeech(speechStreamBuffer.trim(), {
+              rate: preferences.speechRate,
+              volume: preferences.volume ?? 1.0,
+            });
+            speechStreamBuffer = '';
+          }
 
           setMessages((prev) =>
             prev.map((msg) =>
@@ -173,14 +216,6 @@ export default function App() {
                 : msg
             )
           );
-
-          // Auto-speak if enabled
-          if (preferences.autoSpeak && accumulatedText) {
-            speechService.speak(accumulatedText, {
-              rate: preferences.speechRate,
-              volume: preferences.volume ?? 1.0,
-            });
-          }
         },
         onError: (err: string) => {
           setIsProcessing(false);
@@ -199,12 +234,13 @@ export default function App() {
       },
       controller.signal
     );
-  }, [isProcessing, messages, preferences.autoSpeak, preferences.persona, preferences.speechRate, preferences.userName, preferences.volume]);
+  }, [messages, preferences.autoSpeak, preferences.persona, preferences.speechRate, preferences.userName, preferences.volume]);
 
   const handleClearHistory = () => {
+    speechService.stopSpeaking();
     setMessages([]);
     setLatestResponse(
-      'Historial reiniciado. Puedes hablar o escribir una nueva consulta cuando gustes.'
+      'Historial reiniciado. Di "Hola Asistente" o presiona el micrófono para consultar algo.'
     );
     setStatusText('Listo');
   };
@@ -232,7 +268,7 @@ export default function App() {
       handleClearHistory();
     } else if (action.type === 'stop_speech') {
       speechService.stopSpeaking();
-      setStatusText('Audio detenido');
+      setStatusText('Audio silenciado');
     } else if (action.type === 'open_settings') {
       setIsSettingsOpen(true);
     } else if (action.type === 'toggle_listening') {
@@ -249,9 +285,6 @@ export default function App() {
         assistantName: preferences.assistantName,
         onWakeChange: (awake) => {
           setIsAwake(awake);
-          if (awake && preferences.wakeWordSound) {
-            speechService.playChime('wake');
-          }
         },
         onCommand: (action) => {
           handleVoiceCommand(action);
@@ -262,7 +295,7 @@ export default function App() {
       });
 
       if (!started) {
-        console.warn('Could not start continuous listening.');
+        console.warn('Could not start continuous listening automatically.');
       }
     } else {
       speechService.stopContinuousListening();
@@ -272,7 +305,7 @@ export default function App() {
     return () => {
       speechService.stopContinuousListening();
     };
-  }, [preferences.continuousListening, preferences.assistantName, preferences.wakeWordSound, handleVoiceCommand]);
+  }, [preferences.continuousListening, preferences.assistantName, handleVoiceCommand]);
 
   return (
     <div
@@ -303,6 +336,7 @@ export default function App() {
             onSendMessage={handleSendMessage}
             latestResponse={latestResponse}
             isProcessing={isProcessing}
+            isSpeaking={isSpeaking}
             statusText={statusText}
             preferences={preferences}
             latencyMs={lastLatencyMs}
@@ -310,6 +344,11 @@ export default function App() {
             isContinuousListening={preferences.continuousListening}
             isAwake={isAwake}
             onVoiceCommand={handleVoiceCommand}
+            onToggleContinuousListening={() =>
+              handleUpdatePreferences({
+                continuousListening: !preferences.continuousListening,
+              })
+            }
           />
         )}
 

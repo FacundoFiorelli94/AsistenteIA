@@ -1,4 +1,4 @@
-// Browser Speech-to-Text, Continuous Listening, Wake Word and Text-to-Speech service
+// Browser Speech-to-Text, Continuous Listening, Wake Word and Streaming Text-to-Speech service
 import { VoiceCommandAction } from '../types/assistant';
 
 declare global {
@@ -9,6 +9,14 @@ declare global {
   }
 }
 
+export interface SpeechOptions {
+  rate?: number;
+  pitch?: number;
+  volume?: number;
+  onStart?: () => void;
+  onEnd?: () => void;
+}
+
 export class SpeechService {
   private recognition: any = null;
   private isListening: boolean = false;
@@ -17,10 +25,20 @@ export class SpeechService {
   private isAwake: boolean = false;
   private volume: number = 1.0; // 0.0 to 1.0
 
+  // Streaming speech synthesis queue
+  private speechQueue: string[] = [];
+  private isQueuePlaying: boolean = false;
+  private currentUtterance: SpeechSynthesisUtterance | null = null;
+  private currentSpokenSentence: string = '';
+  private recentSpokenHistory: string[] = [];
+
+  // Wake word & session timers
   private wakeTimeout: any = null;
   private restartTimer: any = null;
   private silenceTimer: any = null;
   private currentSessionText: string = '';
+  private lastExecutedCommandTime: number = 0;
+  private lastExecutedText: string = '';
 
   private assistantName: string = 'ASISTENTE IA';
   private onTranscriptCallback: ((text: string, isFinal: boolean) => void) | null = null;
@@ -28,9 +46,12 @@ export class SpeechService {
   private onWakeStateChange: ((isAwake: boolean) => void) | null = null;
   private onErrorCallback: ((error: string) => void) | null = null;
   private onEndCallback: (() => void) | null = null;
+  private onSpeakingStateChange: ((isSpeaking: boolean) => void) | null = null;
+
+  private micStream: MediaStream | null = null;
 
   constructor() {
-    // Lazy initialize when user interacts to avoid audio context / mic permission locks
+    // Check voice support
   }
 
   public setVolume(vol: number): void {
@@ -43,6 +64,31 @@ export class SpeechService {
 
   public isSupported(): boolean {
     return typeof window !== 'undefined' && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  }
+
+  public setSpeakingStateCallback(callback: ((isSpeaking: boolean) => void) | null) {
+    this.onSpeakingStateChange = callback;
+  }
+
+  /**
+   * Request mic permissions with hardware Acoustic Echo Cancellation (AEC)
+   * to prevent speaker audio from bleeding into the microphone.
+   */
+  public async requestMicrophoneAccess(): Promise<boolean> {
+    if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) return false;
+    try {
+      this.micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      return true;
+    } catch (err) {
+      console.warn('Microphone permission request error:', err);
+      return false;
+    }
   }
 
   private createRecognitionInstance(continuous: boolean) {
@@ -87,6 +133,44 @@ export class SpeechService {
 
       if (!currentText) return;
 
+      // ─── ANTI-COLLISION & BARGE-IN ──────────────────────────────────────────
+      // If the assistant is currently speaking:
+      if (this.isSpeaking) {
+        // Check if user is saying an interruption/barge-in command
+        const normalized = currentText.toLowerCase().replace(/[¿?¡!.,]/g, '').trim();
+        const isInterruption =
+          normalized.includes('para') ||
+          normalized.includes('detente') ||
+          normalized.includes('detén') ||
+          normalized.includes('silencio') ||
+          normalized.includes('cállate') ||
+          normalized.includes('basta') ||
+          normalized.includes('alto') ||
+          normalized.includes('stop') ||
+          normalized.includes('hola asistente') ||
+          normalized.includes('oye asistente') ||
+          normalized.includes('asistente');
+
+        if (isInterruption) {
+          // Immediately silence the assistant!
+          this.stopSpeaking();
+          this.playChime('command');
+          if (this.onWakeStateChange) this.onWakeStateChange(true);
+          return;
+        }
+
+        // Loopback echo filter: if the transcript closely matches what the assistant is speaking,
+        // ignore it so the assistant doesn't hear itself and talk to itself!
+        if (this.isSelfEcho(currentText)) {
+          return;
+        }
+
+        // If it's a genuine user speech while assistant is talking, barge-in!
+        if (currentText.length > 5) {
+          this.stopSpeaking();
+        }
+      }
+
       this.currentSessionText = currentText;
 
       // Dispatch to caller
@@ -101,24 +185,22 @@ export class SpeechService {
         clearTimeout(this.silenceTimer);
 
         if (isFinal) {
-          // If browser finalized sentence, submit after brief pause
           this.silenceTimer = setTimeout(() => {
             if (this.currentSessionText && this.isListening) {
               const textToSubmit = this.currentSessionText;
               this.stopListening();
               if (this.onCommandCallback) {
-                this.onCommandCallback({ type: 'query', prompt: textToSubmit });
+                this.executeCommandSafely({ type: 'query', prompt: textToSubmit });
               }
             }
           }, 600);
         } else {
-          // Interim results: wait for 1.4s of silence before auto-submitting
           this.silenceTimer = setTimeout(() => {
             if (this.currentSessionText && this.isListening) {
               const textToSubmit = this.currentSessionText;
               this.stopListening();
               if (this.onCommandCallback) {
-                this.onCommandCallback({ type: 'query', prompt: textToSubmit });
+                this.executeCommandSafely({ type: 'query', prompt: textToSubmit });
               }
             }
           }, 1400);
@@ -127,16 +209,15 @@ export class SpeechService {
     };
 
     rec.onerror = (event: any) => {
-      console.warn('Speech recognition event error:', event.error);
-
-      // Common non-fatal events in continuous mode
+      // Non-fatal events in continuous mode
       if (event.error === 'no-speech' || event.error === 'audio-capture') {
         return;
       }
 
+      console.warn('Speech recognition warning:', event.error);
       let userMsg = 'Error en reconocimiento de voz';
       if (event.error === 'not-allowed') {
-        userMsg = 'Acceso al micrófono denegado. Por favor permite el micrófono en tu navegador.';
+        userMsg = 'Acceso al micrófono denegado. Permite el micrófono en tu navegador.';
       } else if (event.error === 'network') {
         userMsg = 'Error de conexión con el servicio de reconocimiento de voz.';
       }
@@ -147,7 +228,6 @@ export class SpeechService {
     };
 
     rec.onend = () => {
-      const wasListening = this.isListening;
       this.isListening = false;
 
       // In manual mode, if speech ended and we had captured text, trigger submit
@@ -155,15 +235,15 @@ export class SpeechService {
         const textToSubmit = this.currentSessionText.trim();
         this.currentSessionText = '';
         if (this.onCommandCallback) {
-          this.onCommandCallback({ type: 'query', prompt: textToSubmit });
+          this.executeCommandSafely({ type: 'query', prompt: textToSubmit });
         }
       }
 
-      if (this.isContinuousMode && !this.isSpeaking) {
-        // Auto-restart continuous listening in background
+      // Auto-restart in continuous mode if active
+      if (this.isContinuousMode) {
         clearTimeout(this.restartTimer);
         this.restartTimer = setTimeout(() => {
-          if (this.isContinuousMode && !this.isSpeaking && !this.isListening) {
+          if (this.isContinuousMode && !this.isListening) {
             try {
               this.recognition = this.createRecognitionInstance(true);
               this.recognition?.start();
@@ -172,7 +252,7 @@ export class SpeechService {
               // Ignore restart collision
             }
           }
-        }, 400);
+        }, 300);
       } else {
         if (this.onEndCallback) {
           this.onEndCallback();
@@ -181,6 +261,32 @@ export class SpeechService {
     };
 
     return rec;
+  }
+
+  /**
+   * Checks whether the recognized text is the speaker's own output (Acoustic Loopback Echo).
+   */
+  private isSelfEcho(recognizedText: string): boolean {
+    const normRecognized = recognizedText.toLowerCase().replace(/[¿?¡!.,]/g, '').trim();
+    if (!normRecognized) return false;
+
+    // Check against current sentence being spoken
+    if (this.currentSpokenSentence) {
+      const normCurrent = this.currentSpokenSentence.toLowerCase().replace(/[¿?¡!.,]/g, '').trim();
+      if (normCurrent.includes(normRecognized) || normRecognized.includes(normCurrent)) {
+        return true;
+      }
+    }
+
+    // Check against recent history of spoken phrases
+    for (const phrase of this.recentSpokenHistory.slice(-5)) {
+      const normPhrase = phrase.toLowerCase().replace(/[¿?¡!.,]/g, '').trim();
+      if (normPhrase.includes(normRecognized) || normRecognized.includes(normPhrase)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   public playChime(type: 'wake' | 'success' | 'command' = 'wake') {
@@ -192,7 +298,7 @@ export class SpeechService {
       const currentVol = Math.max(0.01, this.volume);
 
       if (type === 'wake') {
-        // High dual-tone friendly chime
+        // High dual-tone friendly wake chime
         const now = ctx.currentTime;
         const osc1 = ctx.createOscillator();
         const osc2 = ctx.createOscillator();
@@ -241,19 +347,18 @@ export class SpeechService {
   }
 
   // Parse voice commands and wake words
-  private parseCommandOrWakeWord(rawText: string): {
+  public parseCommandOrWakeWord(rawText: string): {
     command: VoiceCommandAction | null;
     isWakeWord: boolean;
     isGreeting: boolean;
     queryText: string;
   } {
-    // Normalize string: lowercase, remove punctuation
     const text = rawText
       .toLowerCase()
       .replace(/[¿?¡!.,]/g, '')
       .trim();
 
-    const assistantName = this.assistantName.toLowerCase().trim();
+    const name = this.assistantName.toLowerCase().trim();
 
     // 1. Direct System Commands
     if (
@@ -320,7 +425,9 @@ export class SpeechService {
       text.includes('detener audio') ||
       text.includes('parar voz') ||
       text.includes('cállate') ||
-      text.includes('para')
+      text.includes('detente') ||
+      text.includes('para') ||
+      text.includes('basta')
     ) {
       return { command: { type: 'stop_speech' }, isWakeWord: false, isGreeting: false, queryText: '' };
     }
@@ -333,9 +440,10 @@ export class SpeechService {
       return { command: { type: 'toggle_listening', enable: false }, isWakeWord: false, isGreeting: false, queryText: '' };
     }
 
-    // 2. Greetings Recognition: "hola asistente", "buenos días asistente", "hola aura", etc.
+    // 2. Greetings Recognition: "hola asistente", "hola asistente ia", "buenos días asistente"
     const greetingPatterns = [
-      `hola ${assistantName}`,
+      `hola ${name}`,
+      'hola asistente ia',
       'hola asistente',
       'buenos días asistente',
       'buenas tardes asistente',
@@ -351,26 +459,29 @@ export class SpeechService {
         return {
           command: { type: 'query', prompt: fullPrompt },
           isWakeWord: true,
-          isGreeting: true,
-          queryText: fullPrompt,
+          isGreeting: !remainder, // true if user ONLY said the greeting without extra query
+          queryText: remainder,
         };
       }
     }
 
-    // 3. General Wake Word Triggers: "oye asistente", "hey asistente", "asistente"
+    // 3. General Wake Word Triggers: "oye asistente", "hey asistente", "asistente", etc.
     const wakePatterns = [
-      `oye ${assistantName}`,
-      `hey ${assistantName}`,
-      `ok ${assistantName}`,
-      assistantName,
+      `oye ${name}`,
+      `hey ${name}`,
+      `ok ${name}`,
+      name,
+      'oye asistente ia',
       'oye asistente',
       'hey asistente',
+      'ok asistente',
+      'asistente ia',
       'asistente',
       'despierta',
     ];
 
     for (const pattern of wakePatterns) {
-      if (text.startsWith(pattern) || text.includes(pattern)) {
+      if (text === pattern || text.startsWith(pattern + ' ') || text.includes(pattern)) {
         const idx = text.indexOf(pattern);
         const remainder = text.slice(idx + pattern.length).trim();
         return {
@@ -385,54 +496,72 @@ export class SpeechService {
     return { command: null, isWakeWord: false, isGreeting: false, queryText: '' };
   }
 
+  /**
+   * Executes a command or query safely, preventing duplicates or collisions.
+   */
+  private executeCommandSafely(command: VoiceCommandAction) {
+    const now = Date.now();
+    const commandKey = command.type === 'query' ? command.prompt : command.type;
+
+    // Mutex debounce: drop exact duplicate command if fired within 800ms
+    if (this.lastExecutedText === commandKey && now - this.lastExecutedCommandTime < 800) {
+      return;
+    }
+
+    this.lastExecutedCommandTime = now;
+    this.lastExecutedText = commandKey;
+
+    if (this.onCommandCallback) {
+      this.onCommandCallback(command);
+    }
+  }
+
   private handleContinuousSpeechResult(transcript: string, isFinal: boolean) {
     const { command, isWakeWord, isGreeting, queryText } = this.parseCommandOrWakeWord(transcript);
 
     // 1. Direct System Command (navigate, clear, stop speech)
-    if (command && command.type !== 'query' && isFinal) {
-      this.playChime('command');
-      if (this.onCommandCallback) {
-        this.onCommandCallback(command);
+    if (command && command.type !== 'query') {
+      if (isFinal || transcript.length > 6) {
+        this.playChime('command');
+        this.executeCommandSafely(command);
+        this.setAwakeState(false);
       }
-      this.setAwakeState(false);
       return;
     }
 
-    // 2. Greeting Command (e.g. "Hola Asistente")
-    if (isGreeting && command && command.type === 'query' && isFinal) {
-      this.playChime('wake');
-      if (this.onCommandCallback) {
-        this.onCommandCallback(command);
-      }
-      this.setAwakeState(false);
-      return;
-    }
-
-    // 3. Wake Word Detected
+    // 2. Wake Word Detected!
     if (isWakeWord) {
       if (!this.isAwake) {
         this.setAwakeState(true);
         this.playChime('wake');
       }
 
-      // If user spoke query in the same sentence (e.g. "Oye Asistente, ¿cuál es el clima?")
+      // Case A: User said Wake Word + Question in the SAME sentence (e.g. "Hola Asistente, ¿cuál es el clima?")
       if (queryText && isFinal) {
-        if (this.onCommandCallback) {
-          this.onCommandCallback({ type: 'query', prompt: queryText });
-        }
+        this.executeCommandSafely({ type: 'query', prompt: queryText });
         this.setAwakeState(false);
         return;
       }
-    } else if (this.isAwake && isFinal && transcript.trim()) {
-      // If assistant was already awake and user spoke a query
-      if (this.onCommandCallback) {
-        this.onCommandCallback({ type: 'query', prompt: transcript.trim() });
+
+      // Case B: User said ONLY "Hola Asistente"
+      if (isGreeting && isFinal) {
+        // Acknowledge with a warm, natural quick greeting and keep listening for follow-up!
+        this.speak('¡Hola! Te escucho. ¿En qué puedo ayudarte?', {
+          onEnd: () => {
+            // Keep awake for 8 seconds after greeting finishes so user can ask question
+            this.setAwakeState(true);
+          },
+        });
+        return;
       }
+    } else if (this.isAwake && isFinal && transcript.trim()) {
+      // 3. Assistant was already awake and user spoke a follow-up query
+      this.executeCommandSafely({ type: 'query', prompt: transcript.trim() });
       this.setAwakeState(false);
     }
   }
 
-  private setAwakeState(awake: boolean) {
+  public setAwakeState(awake: boolean) {
     this.isAwake = awake;
     if (this.onWakeStateChange) {
       this.onWakeStateChange(awake);
@@ -440,10 +569,10 @@ export class SpeechService {
 
     clearTimeout(this.wakeTimeout);
     if (awake) {
-      // Auto sleep after 9 seconds of inactivity if no query is spoken
+      // Auto sleep after 8 seconds of inactivity if no query is spoken
       this.wakeTimeout = setTimeout(() => {
         this.setAwakeState(false);
-      }, 9000);
+      }, 8000);
     }
   }
 
@@ -463,6 +592,9 @@ export class SpeechService {
     this.onWakeStateChange = options.onWakeChange || null;
     this.onErrorCallback = options.onError || null;
     this.isContinuousMode = true;
+
+    // Also request mic with echo cancellation if not yet granted
+    this.requestMicrophoneAccess().catch(() => {});
 
     try {
       this.recognition = this.createRecognitionInstance(true);
@@ -500,6 +632,10 @@ export class SpeechService {
     return this.isAwake;
   }
 
+  public getIsSpeaking(): boolean {
+    return this.isSpeaking;
+  }
+
   // Manual one-shot listening for touch button
   public async startListening(
     onTranscript: (text: string, isFinal: boolean) => void,
@@ -512,18 +648,11 @@ export class SpeechService {
       return false;
     }
 
-    // Try requesting mic permission if not granted
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        await navigator.mediaDevices.getUserMedia({ audio: true });
-      }
-    } catch (e: any) {
-      console.warn('Microphone permission warning:', e);
-      if (onError) {
-        onError('Permiso de micrófono no concedido. Habilita el micrófono en tu navegador.');
-      }
-      return false;
-    }
+    // Stop any ongoing speech before listening so user is never interrupted
+    this.stopSpeaking();
+
+    // Request mic access with AEC
+    await this.requestMicrophoneAccess();
 
     this.isContinuousMode = false;
     this.currentSessionText = '';
@@ -558,33 +687,49 @@ export class SpeechService {
     }
   }
 
-  public speak(
-    text: string,
-    options?: { rate?: number; pitch?: number; volume?: number; onEnd?: () => void; onStart?: () => void }
-  ) {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+  // ─── REAL-TIME STREAMING TTS PIPELINE ───────────────────────────────────────
 
-    window.speechSynthesis.cancel();
-    this.isSpeaking = true;
-
-    // Temporarily pause recognition to avoid capturing speaker output
-    if (this.isContinuousMode && this.recognition && this.isListening) {
-      try {
-        this.recognition.stop();
-      } catch (e) {}
-    }
-
-    const cleanText = text
+  /**
+   * Enqueues a single sentence chunk to be spoken in real time as Groq streams it.
+   */
+  public enqueueStreamSpeech(sentence: string, options?: SpeechOptions) {
+    const clean = sentence
       .replace(/[#*`_~\[\]()]/g, ' ')
       .replace(/\n+/g, '. ')
       .trim();
 
-    if (!cleanText) {
+    if (!clean) return;
+
+    this.speechQueue.push(clean);
+
+    if (!this.isQueuePlaying) {
+      this.playNextInQueue(options);
+    }
+  }
+
+  private playNextInQueue(options?: SpeechOptions) {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    if (this.speechQueue.length === 0) {
+      this.isQueuePlaying = false;
       this.isSpeaking = false;
+      if (this.onSpeakingStateChange) this.onSpeakingStateChange(false);
+      if (options?.onEnd) options.onEnd();
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
+    this.isQueuePlaying = true;
+    this.isSpeaking = true;
+    if (this.onSpeakingStateChange) this.onSpeakingStateChange(true);
+
+    const textToSpeak = this.speechQueue.shift()!;
+    this.currentSpokenSentence = textToSpeak;
+    this.recentSpokenHistory.push(textToSpeak);
+    if (this.recentSpokenHistory.length > 10) {
+      this.recentSpokenHistory.shift();
+    }
+
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utterance.lang = 'es-ES';
     utterance.rate = options?.rate || 1.05;
     utterance.pitch = options?.pitch || 1.0;
@@ -599,6 +744,8 @@ export class SpeechService {
           v.name.includes('Sabina') ||
           v.name.includes('Alvaro') ||
           v.name.includes('Jorge') ||
+          v.name.includes('Helena') ||
+          v.name.includes('Raul') ||
           v.name.includes('Monica'))
     ) || voices.find((v) => v.lang.startsWith('es'));
 
@@ -606,49 +753,65 @@ export class SpeechService {
       utterance.voice = spanishVoice;
     }
 
-    const handleSpeechFinish = () => {
-      this.isSpeaking = false;
-      if (options?.onEnd) options.onEnd();
+    this.currentUtterance = utterance;
 
-      // Resume continuous listening if it was active
-      if (this.isContinuousMode && !this.isListening) {
-        clearTimeout(this.restartTimer);
-        this.restartTimer = setTimeout(() => {
-          if (this.isContinuousMode && !this.isSpeaking) {
-            try {
-              this.recognition = this.createRecognitionInstance(true);
-              this.recognition?.start();
-              this.isListening = true;
-            } catch (e) {}
-          }
-        }, 400);
-      }
+    const onFinish = () => {
+      this.currentUtterance = null;
+      // Immediately play next queued sentence
+      this.playNextInQueue(options);
     };
 
-    utterance.onstart = () => {
-      this.isSpeaking = true;
-      if (options?.onStart) options.onStart();
-    };
+    utterance.onend = onFinish;
+    utterance.onerror = onFinish;
 
-    utterance.onend = handleSpeechFinish;
-    utterance.onerror = handleSpeechFinish;
+    if (options?.onStart && this.speechQueue.length === 0) {
+      utterance.onstart = options.onStart;
+    }
 
     window.speechSynthesis.speak(utterance);
   }
 
+  /**
+   * Speak a full block of text (one-shot mode).
+   */
+  public speak(text: string, options?: SpeechOptions) {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+
+    this.stopSpeaking();
+
+    const cleanText = text
+      .replace(/[#*`_~\[\]()]/g, ' ')
+      .replace(/\n+/g, '. ')
+      .trim();
+
+    if (!cleanText) return;
+
+    // Split long text into natural sentences to avoid Chrome's 15-second speech freeze bug
+    const sentences = cleanText.match(/[^.!?]+[.!?]*/g) || [cleanText];
+    for (const s of sentences) {
+      const trimmed = s.trim();
+      if (trimmed) {
+        this.speechQueue.push(trimmed);
+      }
+    }
+
+    this.playNextInQueue(options);
+  }
+
+  /**
+   * Stop speaking immediately (Barge-in / Interruption).
+   */
   public stopSpeaking() {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       window.speechSynthesis.cancel();
-      this.isSpeaking = false;
-
-      // Resume continuous listening if active
-      if (this.isContinuousMode && !this.isListening) {
-        try {
-          this.recognition = this.createRecognitionInstance(true);
-          this.recognition?.start();
-          this.isListening = true;
-        } catch (e) {}
-      }
+    }
+    this.speechQueue = [];
+    this.isQueuePlaying = false;
+    this.isSpeaking = false;
+    this.currentUtterance = null;
+    this.currentSpokenSentence = '';
+    if (this.onSpeakingStateChange) {
+      this.onSpeakingStateChange(false);
     }
   }
 }
