@@ -1,104 +1,151 @@
 """
 Script principal con Flet: Integración de WakeWordEngine.
 Al recibir la señal del callback, actualiza un ft.Text en pantalla para indicar 'Escuchando...'.
+Compatible tanto con ejecución de escritorio nativa como en navegador Web (localhost).
 """
 
 import os
+import sys
 import threading
 import time
 import flet as ft
 from wake_word_engine import WakeWordEngine
 
+# Compatibilidad de enumeraciones entre versiones de Flet (0.x y 1.0+)
+Colors = getattr(ft, "Colors", getattr(ft, "colors", None))
+Icons = getattr(ft, "Icons", getattr(ft, "icons", None))
+
 
 def main(page: ft.Page):
-    # Configuración básica de la ventana
+    # Configuración de la página
     page.title = "Asistente IA - Detección Wake Word"
-    page.window.width = 480
-    page.window.height = 360
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.bgcolor = "#0F172A"
+
+    # Propiedades de ventana (seguras para escritorio y navegador web)
+    if hasattr(page, "window") and page.window:
+        try:
+            page.window.width = 520
+            page.window.height = 420
+        except Exception:
+            pass
 
     # Elemento ft.Text que refleja el estado del asistente
     status_text = ft.Text(
         value="Esperando palabra clave...",
         size=24,
         weight=ft.FontWeight.W_600,
-        color=ft.colors.BLUE_GREY_200,
+        color=Colors.BLUE_GREY_200,
         text_align=ft.TextAlign.CENTER,
     )
 
     status_icon = ft.Icon(
-        name=ft.icons.MIC_NONE_ROUNDED,
+        name=Icons.MIC_NONE_ROUNDED,
         size=64,
-        color=ft.colors.BLUE_GREY_400,
+        color=Colors.BLUE_GREY_400,
     )
 
     # Callback desacoplado que WakeWordEngine ejecuta en segundo plano
     def on_keyword_detected(keyword_index: int = 0):
         # 1. Actualización inmediata del ft.Text a "Escuchando..."
         status_text.value = "Escuchando..."
-        status_text.color = ft.colors.GREEN_ACCENT_400
-        status_icon.name = ft.icons.MIC_ROUNDED
-        status_icon.color = ft.colors.GREEN_ACCENT_400
+        status_text.color = Colors.GREEN_ACCENT_400
+        status_icon.name = Icons.MIC_ROUNDED
+        status_icon.color = Colors.GREEN_ACCENT_400
         page.update()
 
         # 2. Retorno automático a espera tras 3 segundos
         def auto_reset():
             time.sleep(3)
             status_text.value = "Esperando palabra clave..."
-            status_text.color = ft.colors.BLUE_GREY_200
-            status_icon.name = ft.icons.MIC_NONE_ROUNDED
-            status_icon.color = ft.colors.BLUE_GREY_400
+            status_text.color = Colors.BLUE_GREY_200
+            status_icon.name = Icons.MIC_NONE_ROUNDED
+            status_icon.color = Colors.BLUE_GREY_400
             page.update()
 
         threading.Thread(target=auto_reset, daemon=True).start()
 
-    # Obtener Access Key de Picovoice desde variable de entorno o reemplazar manualmente
-    access_key = os.environ.get("PICOVOICE_ACCESS_KEY", "TU_PICOVOICE_ACCESS_KEY")
+    # Obtener Access Key de Picovoice desde variable de entorno o archivo .env
+    access_key = os.environ.get("PICOVOICE_ACCESS_KEY", "")
+    engine = None
 
-    # Instanciación de la clase WakeWordEngine
-    engine = WakeWordEngine(
-        access_key=access_key,
-        keywords=["jarvis"],  # Palabras clave por defecto: "jarvis", "picovoice", "porcupine"
-        on_keyword_detected=on_keyword_detected,
-    )
-
-    # Inicio del hilo Daemon
-    try:
-        engine.start()
-    except Exception as err:
-        status_text.value = f"Configura PICOVOICE_ACCESS_KEY: {err}"
-        status_text.size = 14
-        status_text.color = ft.colors.AMBER_ACCENT_400
+    if access_key and access_key.strip() and access_key != "TU_PICOVOICE_ACCESS_KEY":
+        try:
+            engine = WakeWordEngine(
+                access_key=access_key,
+                keywords=["jarvis"],
+                on_keyword_detected=on_keyword_detected,
+            )
+            engine.start()
+        except Exception as err:
+            status_text.value = f"Aviso Micrófono/Key: {err}"
+            status_text.size = 14
+            status_text.color = Colors.AMBER_ACCENT_400
+    else:
+        # Modo demostración si aún no configuró la clave de Picovoice
+        status_text.value = "Esperando palabra clave (Ingresa PICOVOICE_ACCESS_KEY)"
+        status_text.size = 16
+        status_text.color = Colors.BLUE_GREY_300
 
     # Gestión de ciclo de vida seguro al cerrar la aplicación
     def handle_window_event(e):
-        if e.data == "close":
+        if getattr(e, "data", None) == "close" and engine is not None:
             engine.stop()
-            page.window.destroy()
+            try:
+                page.window.destroy()
+            except Exception:
+                pass
 
-    page.window.prevent_close = True
-    page.window.on_event = handle_window_event
+    if hasattr(page, "window") and page.window:
+        try:
+            page.window.prevent_close = True
+            page.window.on_event = handle_window_event
+        except Exception:
+            pass
+
+    # Botón auxiliar para probar el callback visualmente
+    test_btn = ft.ElevatedButton(
+        text="Probar Detección (Simular Wake Word)",
+        icon=Icons.PLAY_ARROW_ROUNDED,
+        bgcolor="#1E293B",
+        color=Colors.CYAN_ACCENT_400,
+        on_click=lambda _: on_keyword_detected(0),
+    )
 
     # Renderizado en pantalla
     page.add(
         ft.Column(
-            controls=[status_icon, status_text],
+            controls=[
+                status_icon,
+                status_text,
+                ft.Container(height=10),
+                test_btn,
+            ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             alignment=ft.MainAxisAlignment.CENTER,
-            spacing=20,
+            spacing=16,
         )
     )
 
 
-if __name__ == "__main__":
-    import sys
-    # Soporta ejecucion en navegador web: py wake_word_app.py --web
+def start():
     is_web = "--web" in sys.argv or os.environ.get("FLET_WEB", "0") == "1"
+    port = int(os.environ.get("FLET_PORT", "8550"))
+
+    # Compatibilidad para ejecutar con ft.run (Flet 1.0+) o ft.app (Flet 0.x)
+    app_runner = getattr(ft, "run", getattr(ft, "app", None))
+    app_view = getattr(ft, "AppView", None)
+
     if is_web:
-        port = int(os.environ.get("FLET_PORT", "8550"))
         print(f"Iniciando interfaz Flet en http://localhost:{port} ...")
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port)
+        if app_view:
+            app_runner(main, view=app_view.WEB_BROWSER, port=port)
+        else:
+            app_runner(main, port=port)
     else:
-        ft.app(target=main)
+        app_runner(main)
+
+
+if __name__ == "__main__":
+    start()
