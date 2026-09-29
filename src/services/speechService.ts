@@ -133,42 +133,26 @@ export class SpeechService {
 
       if (!currentText) return;
 
-      // ─── ANTI-COLLISION & BARGE-IN ──────────────────────────────────────────
-      // If the assistant is currently speaking:
+      // ─── ANTI-COLLISION & SELECTIVE INTERRUPTION ──────────────────────────
+      // While the assistant is speaking, protect it from being cut off by ambient noise or speaker echo
       if (this.isSpeaking) {
-        // Check if user is saying an interruption/barge-in command
         const normalized = currentText.toLowerCase().replace(/[¿?¡!.,]/g, '').trim();
-        const isInterruption =
-          normalized.includes('para') ||
-          normalized.includes('detente') ||
-          normalized.includes('detén') ||
-          normalized.includes('silencio') ||
-          normalized.includes('cállate') ||
-          normalized.includes('basta') ||
-          normalized.includes('alto') ||
-          normalized.includes('stop') ||
-          normalized.includes('hola asistente') ||
-          normalized.includes('oye asistente') ||
-          normalized.includes('asistente');
 
-        if (isInterruption) {
-          // Immediately silence the assistant!
+        // Only interrupt if user explicitly speaks a deliberate stop command or calls 'Asistente'
+        const isExplicitStop = /\b(silencio|detente|detén|cállate|basta|alto|para ya|deja de hablar)\b/i.test(normalized);
+        const isWakeInterrupt = normalized.includes('asistente') || normalized.includes('asistente ia');
+
+        if (isExplicitStop || isWakeInterrupt) {
           this.stopSpeaking();
           this.playChime('command');
-          if (this.onWakeStateChange) this.onWakeStateChange(true);
+          if (isWakeInterrupt && this.onWakeStateChange) {
+            this.setAwakeState(true);
+          }
           return;
         }
 
-        // Loopback echo filter: if the transcript closely matches what the assistant is speaking,
-        // ignore it so the assistant doesn't hear itself and talk to itself!
-        if (this.isSelfEcho(currentText)) {
-          return;
-        }
-
-        // If it's a genuine user speech while assistant is talking, barge-in!
-        if (currentText.length > 5) {
-          this.stopSpeaking();
-        }
+        // For all other sounds, ambient noise, coughs, or speaker bleed: IGNORE and keep speaking smoothly!
+        return;
       }
 
       this.currentSessionText = currentText;
