@@ -1,0 +1,6 @@
+{
+  "name": "Asistente IA - Raspberry Pi & Web Kiosk",
+  "description": "Asistente de inteligencia artificial táctil y responsivo con baja latencia, procesamiento de voz en tiempo real y modo quiosco para Raspberry Pi 7\".",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,8 @@
+# Dependencias para Raspberry Pi (Asistente IA con Flet)
+flet>=0.23.0
+google-genai>=2.4.0
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+# Para captura de audio con micrófono en Raspberry Pi (Linux):
+# sudo apt-get install python3-pyaudio portaudio19-dev libespeak1
+pyaudio>=0.2.14

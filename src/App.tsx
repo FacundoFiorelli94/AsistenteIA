@@ -1,0 +1,341 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Navbar } from './components/Navbar';
+import { TouchKioskView } from './components/TouchKioskView';
+import { ExpandedChatView } from './components/ExpandedChatView';
+import { FletPythonView } from './components/FletPythonView';
+import { FlutterSimulatorView } from './components/FlutterSimulatorView';
+import { SettingsModal } from './components/SettingsModal';
+import { ChatMessage, AppViewMode, UserPreferences, VoiceCommandAction } from './types/assistant';
+import { streamAssistantResponse } from './services/geminiService';
+import { speechService } from './services/speechService';
+
+const DEFAULT_PREFERENCES: UserPreferences = {
+  userName: 'Usuario',
+  assistantName: 'ASISTENTE IA',
+  persona: 'concise',
+  autoSpeak: true,
+  speechRate: 1.05,
+  theme: 'dark',
+  kioskScale: 1.0,
+  continuousListening: false,
+  wakeWordSound: true,
+  volume: 1.0,
+};
+
+export default function App() {
+  const [viewMode, setViewMode] = useState<AppViewMode>('kiosk_touch');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [latestResponse, setLatestResponse] = useState<string>(
+    '¡Hola! Soy tu Asistente IA. Estoy listo para escucharte y responderte en tiempo real.'
+  );
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [statusText, setStatusText] = useState<string>('Listo');
+  const [lastLatencyMs, setLastLatencyMs] = useState<number | undefined>(undefined);
+  const [lastTtftMs, setLastTtftMs] = useState<number | undefined>(undefined);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isAwake, setIsAwake] = useState<boolean>(false);
+
+  // Load preferences from localStorage or default
+  const [preferences, setPreferences] = useState<UserPreferences>(() => {
+    try {
+      const saved = localStorage.getItem('asistente_preferences');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...DEFAULT_PREFERENCES,
+          ...parsed,
+          volume: parsed.volume !== undefined ? parsed.volume : 1.0,
+        };
+      }
+    } catch (e) {
+      console.warn('Could not read localStorage:', e);
+    }
+    return DEFAULT_PREFERENCES;
+  });
+
+  // Keep speechService volume in sync with user preferences
+  useEffect(() => {
+    speechService.setVolume(preferences.volume ?? 1.0);
+  }, [preferences.volume]);
+
+  // Save preferences
+  useEffect(() => {
+    try {
+      localStorage.setItem('asistente_preferences', JSON.stringify(preferences));
+    } catch (e) {
+      console.warn('Could not save to localStorage:', e);
+    }
+  }, [preferences]);
+
+  // Handle Automatic Dark Mode vs Light Mode
+  useEffect(() => {
+    const root = document.documentElement;
+    if (preferences.theme === 'dark') {
+      root.classList.add('dark');
+      root.style.backgroundColor = '#0F172A';
+    } else if (preferences.theme === 'light') {
+      root.classList.remove('dark');
+      root.style.backgroundColor = '#F8FAFC';
+    } else {
+      // Auto: based on media query or system hour (7pm - 7am = dark)
+      const hour = new Date().getHours();
+      const isNight = hour >= 19 || hour < 7;
+      const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (isNight || systemPrefersDark) {
+        root.classList.add('dark');
+        root.style.backgroundColor = '#0F172A';
+      } else {
+        root.classList.remove('dark');
+        root.style.backgroundColor = '#F8FAFC';
+      }
+    }
+  }, [preferences.theme]);
+
+  // AbortController for cancelable requests
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleSendMessage = useCallback(async (text: string) => {
+    if (!text.trim() || isProcessing) return;
+
+    // Abort previous if active
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text,
+      timestamp: new Date(),
+    };
+
+    const modelMessageId = `model-${Date.now()}`;
+    const initialModelMessage: ChatMessage = {
+      id: modelMessageId,
+      role: 'model',
+      text: '',
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+
+    setMessages((prev) => [...prev, userMessage, initialModelMessage]);
+    setIsProcessing(true);
+    setStatusText('Procesando respuesta...');
+    setLatestResponse('');
+
+    let accumulatedText = '';
+
+    // History for multi-turn
+    const conversationHistory = messages.map((m) => ({
+      role: m.role,
+      text: m.text,
+    }));
+
+    await streamAssistantResponse(
+      text,
+      conversationHistory,
+      preferences.persona,
+      preferences.userName,
+      {
+        onChunk: (chunk: string) => {
+          accumulatedText += chunk;
+          setLatestResponse(accumulatedText);
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === modelMessageId
+                ? { ...msg, text: accumulatedText, isStreaming: true }
+                : msg
+            )
+          );
+        },
+        onFirstToken: (ttftMs: number) => {
+          setLastTtftMs(ttftMs);
+        },
+        onDone: (metrics) => {
+          setIsProcessing(false);
+          setLastLatencyMs(metrics.totalDurationMs);
+          setLastTtftMs(metrics.ttftMs);
+          setStatusText(`Listo · ${metrics.totalDurationMs}ms`);
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === modelMessageId
+                ? {
+                    ...msg,
+                    text: accumulatedText,
+                    isStreaming: false,
+                    latencyMs: metrics.totalDurationMs,
+                    ttftMs: metrics.ttftMs,
+                  }
+                : msg
+            )
+          );
+
+          // Auto-speak if enabled
+          if (preferences.autoSpeak && accumulatedText) {
+            speechService.speak(accumulatedText, {
+              rate: preferences.speechRate,
+              volume: preferences.volume ?? 1.0,
+            });
+          }
+        },
+        onError: (err: string) => {
+          setIsProcessing(false);
+          setStatusText('Error al procesar consulta');
+          const errorMsg = `Error: ${err}`;
+          setLatestResponse(errorMsg);
+
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === modelMessageId
+                ? { ...msg, text: errorMsg, isStreaming: false }
+                : msg
+            )
+          );
+        },
+      },
+      controller.signal
+    );
+  }, [isProcessing, messages, preferences.autoSpeak, preferences.persona, preferences.speechRate, preferences.userName, preferences.volume]);
+
+  const handleClearHistory = () => {
+    setMessages([]);
+    setLatestResponse(
+      'Historial reiniciado. Puedes hablar o escribir una nueva consulta cuando gustes.'
+    );
+    setStatusText('Listo');
+  };
+
+  const handleUpdatePreferences = (newPrefs: Partial<UserPreferences>) => {
+    setPreferences((prev) => ({ ...prev, ...newPrefs }));
+  };
+
+  // Voice command dispatcher
+  const handleVoiceCommand = useCallback((action: VoiceCommandAction) => {
+    if (action.type === 'navigate') {
+      setViewMode(action.target);
+      setStatusText(
+        `Navegando a ${
+          action.target === 'kiosk_touch'
+            ? 'pantalla táctil'
+            : action.target === 'expanded_chat'
+            ? 'chat'
+            : action.target === 'flutter_app'
+            ? 'flutter'
+            : 'código python'
+        } por voz`
+      );
+    } else if (action.type === 'clear') {
+      handleClearHistory();
+    } else if (action.type === 'stop_speech') {
+      speechService.stopSpeaking();
+      setStatusText('Audio detenido');
+    } else if (action.type === 'open_settings') {
+      setIsSettingsOpen(true);
+    } else if (action.type === 'toggle_listening') {
+      handleUpdatePreferences({ continuousListening: action.enable });
+    } else if (action.type === 'query') {
+      handleSendMessage(action.prompt);
+    }
+  }, [handleSendMessage]);
+
+  // Handle continuous listening mode lifecycle via Web Speech API
+  useEffect(() => {
+    if (preferences.continuousListening) {
+      const started = speechService.startContinuousListening({
+        assistantName: preferences.assistantName,
+        onWakeChange: (awake) => {
+          setIsAwake(awake);
+          if (awake && preferences.wakeWordSound) {
+            speechService.playChime('wake');
+          }
+        },
+        onCommand: (action) => {
+          handleVoiceCommand(action);
+        },
+        onError: (err) => {
+          console.warn('Continuous listening speech error:', err);
+        },
+      });
+
+      if (!started) {
+        console.warn('Could not start continuous listening.');
+      }
+    } else {
+      speechService.stopContinuousListening();
+      setIsAwake(false);
+    }
+
+    return () => {
+      speechService.stopContinuousListening();
+    };
+  }, [preferences.continuousListening, preferences.assistantName, preferences.wakeWordSound, handleVoiceCommand]);
+
+  return (
+    <div
+      className={`min-h-screen flex flex-col transition-colors duration-300 ${
+        preferences.theme === 'light' ? 'bg-[#F8FAFC] text-slate-900' : 'bg-[#0F172A] text-[#F8FAFC]'
+      }`}
+    >
+      {/* Top Navbar */}
+      <Navbar
+        currentView={viewMode}
+        onSelectView={setViewMode}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        preferences={preferences}
+        lastLatencyMs={lastLatencyMs}
+        isContinuousListening={preferences.continuousListening}
+        isAwake={isAwake}
+        onToggleContinuousListening={() =>
+          handleUpdatePreferences({
+            continuousListening: !preferences.continuousListening,
+          })
+        }
+      />
+
+      {/* Main View Area */}
+      <main className="flex-1 flex flex-col items-center justify-center p-3 sm:p-6 w-full">
+        {viewMode === 'kiosk_touch' && (
+          <TouchKioskView
+            onSendMessage={handleSendMessage}
+            latestResponse={latestResponse}
+            isProcessing={isProcessing}
+            statusText={statusText}
+            preferences={preferences}
+            latencyMs={lastLatencyMs}
+            ttftMs={lastTtftMs}
+            isContinuousListening={preferences.continuousListening}
+            isAwake={isAwake}
+            onVoiceCommand={handleVoiceCommand}
+          />
+        )}
+
+        {viewMode === 'expanded_chat' && (
+          <ExpandedChatView
+            messages={messages}
+            onSendMessage={handleSendMessage}
+            isProcessing={isProcessing}
+            preferences={preferences}
+            onClearHistory={handleClearHistory}
+            onVoiceCommand={handleVoiceCommand}
+          />
+        )}
+
+        {viewMode === 'flutter_app' && <FlutterSimulatorView preferences={preferences} />}
+
+        {viewMode === 'flet_code' && <FletPythonView />}
+      </main>
+
+      {/* Settings Modal with Voice Input toggle */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        preferences={preferences}
+        onUpdatePreferences={handleUpdatePreferences}
+      />
+    </div>
+  );
+}
