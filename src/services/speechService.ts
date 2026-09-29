@@ -440,60 +440,49 @@ export class SpeechService {
       return { command: { type: 'toggle_listening', enable: false }, isWakeWord: false, isGreeting: false, queryText: '' };
     }
 
-    // 2. Greetings Recognition: "hola asistente", "hola asistente ia", "buenos días asistente"
-    const greetingPatterns = [
-      `hola ${name}`,
-      'hola asistente ia',
-      'hola asistente',
-      'buenos días asistente',
-      'buenas tardes asistente',
-      'buenas noches asistente',
-      'hola qué tal',
-      'hola',
-    ];
+    // 2. Strict Wake Word Engine: ONLY trigger if sentence contains 'asistente' or configured assistant name
+    const wakeKeywords = ['asistente', 'asistente ia', name];
+    let matchedKeyword = '';
 
-    for (const greeting of greetingPatterns) {
-      if (text === greeting || text.startsWith(greeting + ' ')) {
-        const remainder = text.slice(greeting.length).trim();
-        const fullPrompt = remainder ? `Hola, ${remainder}` : '¡Hola! ¿Cómo estás?';
-        return {
-          command: { type: 'query', prompt: fullPrompt },
-          isWakeWord: true,
-          isGreeting: !remainder, // true if user ONLY said the greeting without extra query
-          queryText: remainder,
-        };
+    for (const kw of wakeKeywords) {
+      if (text.includes(kw)) {
+        matchedKeyword = kw;
+        break;
       }
     }
 
-    // 3. General Wake Word Triggers: "oye asistente", "hey asistente", "asistente", etc.
-    const wakePatterns = [
-      `oye ${name}`,
-      `hey ${name}`,
-      `ok ${name}`,
-      name,
-      'oye asistente ia',
-      'oye asistente',
-      'hey asistente',
-      'ok asistente',
-      'asistente ia',
-      'asistente',
-      'despierta',
-    ];
-
-    for (const pattern of wakePatterns) {
-      if (text === pattern || text.startsWith(pattern + ' ') || text.includes(pattern)) {
-        const idx = text.indexOf(pattern);
-        const remainder = text.slice(idx + pattern.length).trim();
-        return {
-          command: remainder ? { type: 'query', prompt: remainder } : null,
-          isWakeWord: true,
-          isGreeting: false,
-          queryText: remainder,
-        };
-      }
+    // If 'asistente' is NOT in the text, it is completely ignored when idle!
+    if (!matchedKeyword) {
+      return { command: null, isWakeWord: false, isGreeting: false, queryText: '' };
     }
 
-    return { command: null, isWakeWord: false, isGreeting: false, queryText: '' };
+    // If 'asistente' IS in the text:
+    const idx = text.indexOf(matchedKeyword);
+    const before = text.slice(0, idx).trim();
+    let remainder = text.slice(idx + matchedKeyword.length).trim();
+
+    // Remove leading words like 'hola', 'oye', 'hey', 'por favor', 'dime'
+    remainder = remainder.replace(/^(?:hola|oye|hey|ok|por favor|dime|puedes decirme|decime|consulta)\s+/i, '').trim();
+
+    // Check if remainder is empty (User said simply "Asistente" or "Hola Asistente")
+    const isOnlyWakeWord = !remainder || remainder.length < 2;
+
+    if (isOnlyWakeWord) {
+      return {
+        command: null,
+        isWakeWord: true,
+        isGreeting: true,
+        queryText: '',
+      };
+    }
+
+    // User said "Asistente [consulta]"
+    return {
+      command: { type: 'query', prompt: remainder },
+      isWakeWord: true,
+      isGreeting: false,
+      queryText: remainder,
+    };
   }
 
   /**
@@ -529,35 +518,58 @@ export class SpeechService {
       return;
     }
 
-    // 2. Wake Word Detected!
+    // 2. Wake Word Detected ('Asistente' spoken)
     if (isWakeWord) {
       if (!this.isAwake) {
         this.setAwakeState(true);
         this.playChime('wake');
       }
 
-      // Case A: User said Wake Word + Question in the SAME sentence (e.g. "Hola Asistente, ¿cuál es el clima?")
-      if (queryText && isFinal) {
-        this.executeCommandSafely({ type: 'query', prompt: queryText });
-        this.setAwakeState(false);
-        return;
+      // Case A: User said Wake Word + Question (e.g. "Asistente, ¿cuál es el clima?")
+      if (queryText) {
+        clearTimeout(this.silenceTimer);
+        if (isFinal) {
+          this.executeCommandSafely({ type: 'query', prompt: queryText });
+          this.setAwakeState(false);
+          return;
+        } else {
+          // Fast interim debounce: submit after 1.1s if user paused
+          this.silenceTimer = setTimeout(() => {
+            if (this.currentSessionText) {
+              const parsed = this.parseCommandOrWakeWord(this.currentSessionText);
+              if (parsed.queryText) {
+                this.executeCommandSafely({ type: 'query', prompt: parsed.queryText });
+                this.setAwakeState(false);
+              }
+            }
+          }, 1100);
+          return;
+        }
       }
 
-      // Case B: User said ONLY "Hola Asistente"
-      if (isGreeting && isFinal) {
-        // Acknowledge with a warm, natural quick greeting and keep listening for follow-up!
-        this.speak('¡Hola! Te escucho. ¿En qué puedo ayudarte?', {
+      // Case B: User said ONLY "Asistente"
+      if (isGreeting && (isFinal || transcript.length >= 8)) {
+        this.speak('Dime, te escucho.', {
           onEnd: () => {
-            // Keep awake for 8 seconds after greeting finishes so user can ask question
             this.setAwakeState(true);
           },
         });
         return;
       }
-    } else if (this.isAwake && isFinal && transcript.trim()) {
-      // 3. Assistant was already awake and user spoke a follow-up query
-      this.executeCommandSafely({ type: 'query', prompt: transcript.trim() });
-      this.setAwakeState(false);
+    } else if (this.isAwake && transcript.trim()) {
+      // 3. Assistant was already awake and user spoke their follow-up question
+      clearTimeout(this.silenceTimer);
+      if (isFinal) {
+        this.executeCommandSafely({ type: 'query', prompt: transcript.trim() });
+        this.setAwakeState(false);
+      } else {
+        this.silenceTimer = setTimeout(() => {
+          if (this.currentSessionText && this.isAwake) {
+            this.executeCommandSafely({ type: 'query', prompt: this.currentSessionText.trim() });
+            this.setAwakeState(false);
+          }
+        }, 1100);
+      }
     }
   }
 

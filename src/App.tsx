@@ -278,10 +278,10 @@ export default function App() {
     }
   }, [handleSendMessage]);
 
-  // Handle continuous listening mode lifecycle via Web Speech API
+  // Continuous voice listening is perpetually active and auto-unlocked
   useEffect(() => {
-    if (preferences.continuousListening) {
-      const started = speechService.startContinuousListening({
+    const startAudio = () => {
+      speechService.startContinuousListening({
         assistantName: preferences.assistantName,
         onWakeChange: (awake) => {
           setIsAwake(awake);
@@ -293,19 +293,26 @@ export default function App() {
           console.warn('Continuous listening speech error:', err);
         },
       });
+    };
 
-      if (!started) {
-        console.warn('Could not start continuous listening automatically.');
-      }
-    } else {
-      speechService.stopContinuousListening();
-      setIsAwake(false);
-    }
+    startAudio();
+
+    // Auto-unlock on first document touch/click if browser blocked mic before user gesture
+    const onFirstInteraction = () => {
+      startAudio();
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
+    };
+
+    window.addEventListener('pointerdown', onFirstInteraction);
+    window.addEventListener('keydown', onFirstInteraction);
 
     return () => {
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
       speechService.stopContinuousListening();
     };
-  }, [preferences.continuousListening, preferences.assistantName, handleVoiceCommand]);
+  }, [preferences.assistantName, handleVoiceCommand]);
 
   return (
     <div
@@ -313,20 +320,12 @@ export default function App() {
         preferences.theme === 'light' ? 'bg-[#F8FAFC] text-slate-900' : 'bg-[#0F172A] text-[#F8FAFC]'
       }`}
     >
-      {/* Top Navbar */}
+      {/* Top Navbar without clutter tabs */}
       <Navbar
-        currentView={viewMode}
-        onSelectView={setViewMode}
         onOpenSettings={() => setIsSettingsOpen(true)}
         preferences={preferences}
         lastLatencyMs={lastLatencyMs}
-        isContinuousListening={preferences.continuousListening}
         isAwake={isAwake}
-        onToggleContinuousListening={() =>
-          handleUpdatePreferences({
-            continuousListening: !preferences.continuousListening,
-          })
-        }
       />
 
       {/* Main View Area */}
@@ -341,14 +340,8 @@ export default function App() {
             preferences={preferences}
             latencyMs={lastLatencyMs}
             ttftMs={lastTtftMs}
-            isContinuousListening={preferences.continuousListening}
             isAwake={isAwake}
             onVoiceCommand={handleVoiceCommand}
-            onToggleContinuousListening={() =>
-              handleUpdatePreferences({
-                continuousListening: !preferences.continuousListening,
-              })
-            }
           />
         )}
 

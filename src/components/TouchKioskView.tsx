@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Mic, MicOff, Send, Volume2, VolumeX, Copy, Check, RotateCcw, AlertCircle, Radio } from 'lucide-react';
+import { Sparkles, Mic, MicOff, Send, Volume2, VolumeX, Copy, Check, RotateCcw, AlertCircle } from 'lucide-react';
 import { UserPreferences, VoiceCommandAction } from '../types/assistant';
 import { speechService } from '../services/speechService';
 import { AudioWaveform } from './AudioWaveform';
@@ -13,10 +13,8 @@ interface TouchKioskViewProps {
   preferences: UserPreferences;
   latencyMs?: number;
   ttftMs?: number;
-  isContinuousListening?: boolean;
   isAwake?: boolean;
   onVoiceCommand?: (action: VoiceCommandAction) => void;
-  onToggleContinuousListening?: () => void;
 }
 
 export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
@@ -28,13 +26,10 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
   preferences,
   latencyMs,
   ttftMs,
-  isContinuousListening,
   isAwake,
   onVoiceCommand,
-  onToggleContinuousListening,
 }) => {
   const [inputText, setInputText] = useState('');
-  const [isListening, setIsListening] = useState(false);
   const [copied, setCopied] = useState(false);
   const [speechError, setSpeechError] = useState<string | null>(null);
 
@@ -56,55 +51,12 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
       return;
     }
 
-    // 2. If continuous listening is enabled: clicking the mic wakes up the assistant directly
-    if (isContinuousListening) {
-      if (isAwake) {
-        speechService.setAwakeState(false);
-      } else {
-        speechService.setAwakeState(true);
-        speechService.playChime('wake');
-      }
-      return;
-    }
-
-    // 3. Manual one-shot listening
-    if (isListening) {
-      speechService.stopListening();
-      setIsListening(false);
-      if (inputText.trim()) {
-        const text = inputText.trim();
-        setInputText('');
-        onSendMessage(text);
-      }
+    // 2. Microphone is ALWAYS active: clicking the mic wakes up the assistant directly without needing to say "Asistente"
+    if (isAwake) {
+      speechService.setAwakeState(false);
     } else {
-      setSpeechError(null);
-      setIsListening(true);
-      const started = await speechService.startListening(
-        (transcript) => {
-          setInputText(transcript);
-        },
-        (command) => {
-          setIsListening(false);
-          if (command.type === 'query' && command.prompt.trim()) {
-            setInputText('');
-            onSendMessage(command.prompt.trim());
-          } else if (onVoiceCommand) {
-            onVoiceCommand(command);
-          }
-        },
-        (errorMsg) => {
-          console.warn('Speech error:', errorMsg);
-          setSpeechError(errorMsg);
-          setIsListening(false);
-        },
-        () => {
-          setIsListening(false);
-        }
-      );
-
-      if (!started) {
-        setIsListening(false);
-      }
+      speechService.setAwakeState(true);
+      speechService.playChime('wake');
     }
   };
 
@@ -146,7 +98,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
     '¿Qué hora es?',
     'Dame 3 ideas para cenar rápido y saludable',
     'Explícame la teoría de la relatividad en breve',
-    'Cuéntame un dato curioso sobre el espacio',
+    'Cuéntame un dato curioso',
   ];
 
   return (
@@ -155,7 +107,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
       <div className="w-full max-w-[680px] flex items-center justify-between mb-3 px-1 text-xs text-slate-400">
         <div className="flex items-center gap-2">
           <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="font-medium text-slate-300">Asistente en Línea</span>
+          <span className="font-medium text-slate-300">Voz Activa · Di "Asistente"</span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -195,65 +147,25 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
             ) : (
               <p className="text-[13px] text-slate-400 italic tracking-wide">
                 {isSpeaking
-                  ? 'Hablando en tiempo real · Di "Silencio" o toca el micro para parar'
+                  ? 'Hablando en tiempo real · Di "Silencio" para parar'
                   : isAwake
-                  ? `¡Te escucho! Di tu pregunta ahora...`
-                  : isListening
-                  ? 'Escuchando voz... Habla ahora'
+                  ? '¡Te escucho! Di tu consulta...'
                   : isProcessing
                   ? 'Generando respuesta en tiempo real...'
-                  : isContinuousListening
-                  ? `Di "Hola ${preferences.assistantName}" para despertar`
-                  : statusText || 'Listo'}
+                  : 'Siempre activo · Di "Asistente"'}
               </p>
             )}
-            {!speechError && (isListening || isSpeaking || isProcessing || isAwake) && (
+            {!speechError && (isAwake || isSpeaking || isProcessing) && (
               <AudioWaveform
                 isActive={true}
-                type={isListening || isAwake ? 'listening' : isSpeaking ? 'speaking' : 'processing'}
+                type={isAwake ? 'listening' : isSpeaking ? 'speaking' : 'processing'}
               />
             )}
           </div>
         </div>
 
-        {/* 3. Hands-Free Wake Word Interactive Banner */}
-        <div className="w-full max-w-[600px] mb-3 z-10 flex items-center justify-between px-3.5 py-2 rounded-2xl bg-slate-950/80 border border-slate-800 text-xs shadow-inner">
-          <div className="flex items-center gap-2.5">
-            <div
-              className={`w-2.5 h-2.5 rounded-full transition-all ${
-                isAwake
-                  ? 'bg-rose-500 animate-ping'
-                  : isContinuousListening
-                  ? 'bg-emerald-400 animate-pulse'
-                  : 'bg-slate-600'
-              }`}
-            />
-            <span className="text-slate-300 font-medium">
-              {isAwake
-                ? '¡Asistente despierto! Escuchando consulta...'
-                : isContinuousListening
-                ? `Manos libres activo · Di "Hola ${preferences.assistantName}"`
-                : 'Modo Manos Libres apagado'}
-            </span>
-          </div>
-
-          {onToggleContinuousListening && (
-            <button
-              onClick={onToggleContinuousListening}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-[11px] font-semibold transition-all ${
-                isContinuousListening
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20'
-                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/20'
-              }`}
-            >
-              <Radio className="w-3 h-3" />
-              <span>{isContinuousListening ? 'Pausar' : 'Activar Manos Libres'}</span>
-            </button>
-          )}
-        </div>
-
-        {/* 4. Caja de Respuestas Elevada */}
-        <div className="w-full max-w-[600px] mt-1 mb-1 z-10">
+        {/* 3. Caja de Respuestas Elevada */}
+        <div className="w-full max-w-[600px] mt-2 mb-1 z-10">
           <div
             ref={responseScrollRef}
             className="w-full min-h-[160px] max-h-[220px] bg-slate-950/80 border border-slate-800/80 rounded-2xl p-5 overflow-y-auto flex flex-col justify-start relative shadow-inner transition-all focus:outline-none scroll-smooth"
@@ -264,7 +176,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
                 <span className="text-white">{latestResponse}</span>
               ) : (
                 <span className="text-slate-500 italic">
-                  Las respuestas aparecerán aquí. Di "Hola Asistente" para hablar en tiempo real.
+                  Las respuestas aparecerán aquí. Di "Asistente" en cualquier momento para hablar en tiempo real.
                 </span>
               )}
             </div>
@@ -314,7 +226,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
           )}
         </div>
 
-        {/* 5. Barra de Interacción Inferior */}
+        {/* 4. Barra de Interacción Inferior */}
         <div className="w-full max-w-[600px] flex items-center gap-2.5 mt-2 z-10">
           {/* Botón táctil de micrófono */}
           <button
@@ -322,36 +234,32 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
             className={`w-[50px] h-[50px] rounded-2xl flex items-center justify-center transition-all duration-200 shrink-0 touch-target focus:outline-none focus:ring-2 focus:ring-blue-400/50 relative ${
               isSpeaking
                 ? 'bg-rose-600 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse'
-                : isListening || isAwake
+                : isAwake
                 ? 'bg-rose-600 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)] scale-105 ring-4 ring-rose-500/20'
-                : isContinuousListening
-                ? 'bg-slate-800/90 border border-emerald-500/50 text-emerald-400 hover:bg-slate-700 active:scale-95'
-                : 'bg-slate-800 border border-slate-700 text-blue-400 hover:bg-slate-700 active:scale-95'
+                : 'bg-slate-800/90 border border-emerald-500/40 text-emerald-400 hover:bg-slate-700 active:scale-95'
             }`}
             title={
               isSpeaking
                 ? 'Asistente hablando · Clic para silenciar (Barge-in)'
-                : isListening || isAwake
-                ? 'Escuchando voz activa'
-                : isContinuousListening
-                ? 'Manos Libres Activo · Clic para despertar'
-                : 'Hablar por micrófono'
+                : isAwake
+                ? 'Escuchando consulta activa'
+                : 'Micrófono siempre activo · Clic para despertar directamente'
             }
             aria-label="Micrófono"
           >
-            {isContinuousListening && !isListening && !isAwake && !isSpeaking && (
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400" />
+            {!isAwake && !isSpeaking && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             )}
             {isSpeaking ? (
               <VolumeX className="w-6 h-6 animate-pulse text-white" />
-            ) : isListening || isAwake ? (
+            ) : isAwake ? (
               <MicOff className="w-6 h-6 animate-pulse" />
             ) : (
               <Mic className="w-6 h-6" />
             )}
           </button>
 
-          {/* Campo de texto (TextField) integrado */}
+          {/* Campo de texto integrado */}
           <div className="flex-1 relative">
             <input
               ref={inputRef}
@@ -360,7 +268,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={isProcessing}
-              placeholder="Escribe tu consulta o di 'Hola Asistente'..."
+              placeholder="Escribe tu consulta o di 'Asistente'..."
               className="w-full h-[50px] bg-slate-950 border border-slate-800 focus:border-blue-500 rounded-2xl px-4 text-[15px] text-white placeholder-slate-500 outline-none transition-all duration-200 disabled:opacity-50 shadow-inner"
             />
             {inputText && (
@@ -391,7 +299,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
 
         {/* Sugerencias Rápidas */}
         <div className="w-full max-w-[600px] flex items-center gap-2 mt-4 overflow-x-auto pb-1 text-xs z-10 scrollbar-none">
-          <span className="text-slate-500 shrink-0 text-[11px] font-medium">Sugerencias:</span>
+          <span className="text-slate-500 shrink-0 text-[11px] font-medium">Ejemplos de voz:</span>
           {samplePrompts.map((prompt, idx) => (
             <button
               key={idx}
@@ -401,7 +309,7 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
               }}
               className="whitespace-nowrap px-3 py-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-800 text-slate-300 border border-slate-800/80 hover:border-slate-700 transition-colors text-[11px]"
             >
-              {prompt}
+              "Asistente, {prompt.toLowerCase().replace(/[¿?]/g, '')}"
             </button>
           ))}
         </div>
