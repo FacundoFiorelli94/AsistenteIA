@@ -14,10 +14,10 @@ const DEFAULT_PREFERENCES: UserPreferences = {
   assistantName: 'ASISTENTE IA',
   persona: 'concise',
   autoSpeak: true,
-  speechRate: 1.05,
+  speechRate: 0.98, // Natural, unhurried human conversational tempo
   theme: 'dark',
   kioskScale: 1.0,
-  continuousListening: true, // Default enabled for hands-free "Hola Asistente"
+  continuousListening: true, // Always active
   wakeWordSound: true,
   volume: 1.0,
 };
@@ -26,7 +26,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<AppViewMode>('kiosk_touch');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [latestResponse, setLatestResponse] = useState<string>(
-    '¡Hola! Soy tu Asistente IA. Di "Hola Asistente" o presiona el micrófono para hablarme en tiempo real.'
+    '¡Hola! Soy tu Asistente IA. Di "Asistente" en cualquier momento para hablar conmigo en tiempo real.'
   );
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
@@ -45,9 +45,9 @@ export default function App() {
         return {
           ...DEFAULT_PREFERENCES,
           ...parsed,
+          speechRate: parsed.speechRate === 1.05 || !parsed.speechRate ? 0.98 : parsed.speechRate,
           volume: parsed.volume !== undefined ? parsed.volume : 1.0,
-          // Always keep continuousListening enabled by default unless explicitly disabled
-          continuousListening: parsed.continuousListening !== undefined ? parsed.continuousListening : true,
+          continuousListening: true,
         };
       }
     } catch (e) {
@@ -173,11 +173,17 @@ export default function App() {
             // Match full sentence up to punctuation mark
             const match = speechStreamBuffer.match(/^([\s\S]*?[.?!:\n]+(?:\s+|$))([\s\S]*)$/);
             if (match) {
-              const sentenceToSpeak = match[1].trim();
+              const rawSentence = match[1].trim();
               speechStreamBuffer = match[2];
 
-              if (sentenceToSpeak && sentenceToSpeak.length > 2) {
-                speechService.enqueueStreamSpeech(sentenceToSpeak, {
+              // Clean markdown symbols to ensure smooth human speech
+              const cleanSentence = rawSentence
+                .replace(/[*#`_~>\[\]()]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+              if (cleanSentence && cleanSentence.length > 2) {
+                speechService.enqueueStreamSpeech(cleanSentence, {
                   rate: preferences.speechRate,
                   volume: preferences.volume ?? 1.0,
                 });
@@ -196,10 +202,17 @@ export default function App() {
 
           // Flush any trailing speech words in the buffer
           if (preferences.autoSpeak && speechStreamBuffer.trim()) {
-            speechService.enqueueStreamSpeech(speechStreamBuffer.trim(), {
-              rate: preferences.speechRate,
-              volume: preferences.volume ?? 1.0,
-            });
+            const cleanTrailing = speechStreamBuffer
+              .replace(/[*#`_~>\[\]()]/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+
+            if (cleanTrailing) {
+              speechService.enqueueStreamSpeech(cleanTrailing, {
+                rate: preferences.speechRate,
+                volume: preferences.volume ?? 1.0,
+              });
+            }
             speechStreamBuffer = '';
           }
 

@@ -28,8 +28,7 @@ export const AudioWaveform: React.FC<AudioWaveformProps> = ({ isActive, type }) 
             className={`w-1 rounded-full transition-all duration-150 ${colorClass}`}
             style={{
               height: isActive ? `${Math.max(6, Math.sin(index + Date.now() / 200) * 16 + 10)}px` : '4px',
-              animation: `soundwave ${duration} ease-in-out infinite alternate`,
-              animationDelay: `${delay}s`,
+              animation: `soundwave ${duration} ease-in-out ${delay}s infinite alternate`,
             }}
           />
         );

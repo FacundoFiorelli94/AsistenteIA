@@ -533,7 +533,10 @@ export class SpeechService {
           this.setAwakeState(false);
           return;
         } else {
-          // Fast interim debounce: submit after 1.1s if user paused
+          // Adaptive Turn-Taking VAD: 460ms of silence after a thought triggers immediately
+          const wordCount = queryText.split(/\s+/).length;
+          const turnDelay = wordCount >= 3 ? 460 : 620;
+
           this.silenceTimer = setTimeout(() => {
             if (this.currentSessionText) {
               const parsed = this.parseCommandOrWakeWord(this.currentSessionText);
@@ -542,7 +545,7 @@ export class SpeechService {
                 this.setAwakeState(false);
               }
             }
-          }, 1100);
+          }, turnDelay);
           return;
         }
       }
@@ -550,6 +553,7 @@ export class SpeechService {
       // Case B: User said ONLY "Asistente"
       if (isGreeting && (isFinal || transcript.length >= 8)) {
         this.speak('Dime, te escucho.', {
+          rate: 0.98,
           onEnd: () => {
             this.setAwakeState(true);
           },
@@ -563,12 +567,15 @@ export class SpeechService {
         this.executeCommandSafely({ type: 'query', prompt: transcript.trim() });
         this.setAwakeState(false);
       } else {
+        const wordCount = transcript.trim().split(/\s+/).length;
+        const turnDelay = wordCount >= 3 ? 460 : 620;
+
         this.silenceTimer = setTimeout(() => {
           if (this.currentSessionText && this.isAwake) {
             this.executeCommandSafely({ type: 'query', prompt: this.currentSessionText.trim() });
             this.setAwakeState(false);
           }
-        }, 1100);
+        }, turnDelay);
       }
     }
   }
@@ -743,23 +750,17 @@ export class SpeechService {
 
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     utterance.lang = 'es-ES';
-    utterance.rate = options?.rate || 1.05;
+    utterance.rate = options?.rate !== undefined ? options.rate : 0.98; // Natural, unhurried conversational tempo
     utterance.pitch = options?.pitch || 1.0;
     utterance.volume = options?.volume !== undefined ? Math.max(0, Math.min(1, options.volume)) : this.volume;
 
     const voices = window.speechSynthesis.getVoices();
-    const spanishVoice = voices.find(
-      (v) =>
-        v.lang.startsWith('es') &&
-        (v.name.includes('Natural') ||
-          v.name.includes('Google') ||
-          v.name.includes('Sabina') ||
-          v.name.includes('Alvaro') ||
-          v.name.includes('Jorge') ||
-          v.name.includes('Helena') ||
-          v.name.includes('Raul') ||
-          v.name.includes('Monica'))
-    ) || voices.find((v) => v.lang.startsWith('es'));
+    // Prioritize natural neural Spanish voices
+    const spanishVoice =
+      voices.find((v) => v.lang.startsWith('es') && (v.name.includes('Natural') || v.name.includes('Online'))) ||
+      voices.find((v) => v.lang.startsWith('es') && (v.name.includes('Sabina') || v.name.includes('Helena') || v.name.includes('Alvaro') || v.name.includes('Jorge') || v.name.includes('Raul'))) ||
+      voices.find((v) => v.lang.startsWith('es') && v.name.includes('Google')) ||
+      voices.find((v) => v.lang.startsWith('es'));
 
     if (spanishVoice) {
       utterance.voice = spanishVoice;
@@ -769,8 +770,12 @@ export class SpeechService {
 
     const onFinish = () => {
       this.currentUtterance = null;
-      // Immediately play next queued sentence
-      this.playNextInQueue(options);
+      // Natural 160ms conversational breath pause between clauses so sentences flow smoothly without rushing
+      setTimeout(() => {
+        if (this.isSpeaking) {
+          this.playNextInQueue(options);
+        }
+      }, 160);
     };
 
     utterance.onend = onFinish;
