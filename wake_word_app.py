@@ -93,4 +93,12 @@ def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    import sys
+    # Soporta ejecucion en navegador web: py wake_word_app.py --web
+    is_web = "--web" in sys.argv or os.environ.get("FLET_WEB", "0") == "1"
+    if is_web:
+        port = int(os.environ.get("FLET_PORT", "8550"))
+        print(f"Iniciando interfaz Flet en http://localhost:{port} ...")
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port)
+    else:
+        ft.app(target=main)
