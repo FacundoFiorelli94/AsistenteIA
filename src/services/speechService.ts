@@ -238,7 +238,11 @@ export class SpeechService {
 
     rec.onend = () => {
       this.isListening = false;
-      if (this.onListeningStateChange) {
+
+      // Only notify UI of listening=false when NOT in continuous mode.
+      // In continuous mode, we auto-restart immediately so firing false→true
+      // would cause the mic indicator to flicker green↔amber rapidly.
+      if (!this.isContinuousMode && this.onListeningStateChange) {
         this.onListeningStateChange(false);
       }
 
@@ -677,6 +681,11 @@ export class SpeechService {
         this.recognition.stop();
       } catch (e) {}
       this.isListening = false;
+    }
+
+    // Explicitly notify UI since rec.onend no longer fires false in continuous mode
+    if (this.onListeningStateChange) {
+      this.onListeningStateChange(false);
     }
   }
 
