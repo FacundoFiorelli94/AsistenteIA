@@ -11,9 +11,20 @@ import time
 import flet as ft
 from wake_word_engine import WakeWordEngine
 
-# Compatibilidad de enumeraciones entre versiones de Flet (0.x y 1.0+)
+# Compatibilidad de enumeraciones y controles entre versiones de Flet (0.x y 1.0+)
 Colors = getattr(ft, "Colors", getattr(ft, "colors", None))
 Icons = getattr(ft, "Icons", getattr(ft, "icons", None))
+
+
+def set_icon_visual(icon_ctrl: ft.Icon, new_icon, new_color=None):
+    """Actualiza de forma compatible el icono y su color."""
+    if hasattr(icon_ctrl, "icon"):
+        icon_ctrl.icon = new_icon
+    elif hasattr(icon_ctrl, "name"):
+        icon_ctrl.name = new_icon
+
+    if new_color is not None:
+        icon_ctrl.color = new_color
 
 
 def main(page: ft.Page):
@@ -40,8 +51,9 @@ def main(page: ft.Page):
         text_align=ft.TextAlign.CENTER,
     )
 
+    # Icono de estado (usando el argumento posicional compatible)
     status_icon = ft.Icon(
-        name=Icons.MIC_NONE_ROUNDED,
+        Icons.MIC_NONE_ROUNDED,
         size=64,
         color=Colors.BLUE_GREY_400,
     )
@@ -51,8 +63,7 @@ def main(page: ft.Page):
         # 1. Actualización inmediata del ft.Text a "Escuchando..."
         status_text.value = "Escuchando..."
         status_text.color = Colors.GREEN_ACCENT_400
-        status_icon.name = Icons.MIC_ROUNDED
-        status_icon.color = Colors.GREEN_ACCENT_400
+        set_icon_visual(status_icon, Icons.MIC_ROUNDED, Colors.GREEN_ACCENT_400)
         page.update()
 
         # 2. Retorno automático a espera tras 3 segundos
@@ -60,13 +71,12 @@ def main(page: ft.Page):
             time.sleep(3)
             status_text.value = "Esperando palabra clave..."
             status_text.color = Colors.BLUE_GREY_200
-            status_icon.name = Icons.MIC_NONE_ROUNDED
-            status_icon.color = Colors.BLUE_GREY_400
+            set_icon_visual(status_icon, Icons.MIC_NONE_ROUNDED, Colors.BLUE_GREY_400)
             page.update()
 
         threading.Thread(target=auto_reset, daemon=True).start()
 
-    # Obtener Access Key de Picovoice desde variable de entorno o archivo .env
+    # Obtener Access Key de Picovoice desde variable de entorno
     access_key = os.environ.get("PICOVOICE_ACCESS_KEY", "")
     engine = None
 
@@ -104,12 +114,11 @@ def main(page: ft.Page):
         except Exception:
             pass
 
-    # Botón auxiliar para probar el callback visualmente
-    test_btn = ft.ElevatedButton(
-        text="Probar Detección (Simular Wake Word)",
+    # Botón auxiliar compatible para probar el callback visualmente
+    ButtonClass = getattr(ft, "FilledButton", getattr(ft, "ElevatedButton", None))
+    test_btn = ButtonClass(
+        "Probar Detección (Simular Wake Word)",
         icon=Icons.PLAY_ARROW_ROUNDED,
-        bgcolor="#1E293B",
-        color=Colors.CYAN_ACCENT_400,
         on_click=lambda _: on_keyword_detected(0),
     )
 
