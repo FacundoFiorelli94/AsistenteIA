@@ -35,6 +35,8 @@ export default function App() {
   const [lastTtftMs, setLastTtftMs] = useState<number | undefined>(undefined);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isAwake, setIsAwake] = useState<boolean>(false);
+  const [isMicListening, setIsMicListening] = useState<boolean>(false);
+  const [liveTranscript, setLiveTranscript] = useState<string>('');
 
   // Load preferences from localStorage or default
   const [preferences, setPreferences] = useState<UserPreferences>(() => {
@@ -262,6 +264,9 @@ export default function App() {
     setPreferences((prev) => ({ ...prev, ...newPrefs }));
   };
 
+  const handleSendMessageRef = useRef<(text: string) => Promise<void>>(async () => {});
+  handleSendMessageRef.current = handleSendMessage;
+
   // Voice command dispatcher
   const handleVoiceCommand = useCallback((action: VoiceCommandAction) => {
     if (action.type === 'navigate') {
@@ -287,20 +292,34 @@ export default function App() {
     } else if (action.type === 'toggle_listening') {
       handleUpdatePreferences({ continuousListening: action.enable });
     } else if (action.type === 'query') {
-      handleSendMessage(action.prompt);
+      handleSendMessageRef.current(action.prompt);
     }
-  }, [handleSendMessage]);
+  }, []);
+
+  const handleVoiceCommandRef = useRef<(action: VoiceCommandAction) => void>(handleVoiceCommand);
+  handleVoiceCommandRef.current = handleVoiceCommand;
 
   // Continuous voice listening is perpetually active and auto-unlocked
   useEffect(() => {
-    const startAudio = () => {
+    speechService.setListeningStateCallback((listening) => {
+      setIsMicListening(listening);
+    });
+
+    const startAudio = async () => {
+      await speechService.requestMicrophoneAccess();
       speechService.startContinuousListening({
         assistantName: preferences.assistantName,
+        onTranscript: (text, isFinal) => {
+          setLiveTranscript(text);
+          if (isFinal) {
+            setTimeout(() => setLiveTranscript(''), 2500);
+          }
+        },
         onWakeChange: (awake) => {
           setIsAwake(awake);
         },
         onCommand: (action) => {
-          handleVoiceCommand(action);
+          handleVoiceCommandRef.current(action);
         },
         onError: (err) => {
           console.warn('Continuous listening speech error:', err);
@@ -325,7 +344,7 @@ export default function App() {
       window.removeEventListener('keydown', onFirstInteraction);
       speechService.stopContinuousListening();
     };
-  }, [preferences.assistantName, handleVoiceCommand]);
+  }, [preferences.assistantName]);
 
   return (
     <div
@@ -354,6 +373,8 @@ export default function App() {
             latencyMs={lastLatencyMs}
             ttftMs={lastTtftMs}
             isAwake={isAwake}
+            isMicListening={isMicListening}
+            liveTranscript={liveTranscript}
             onVoiceCommand={handleVoiceCommand}
           />
         )}

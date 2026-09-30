@@ -14,6 +14,8 @@ interface TouchKioskViewProps {
   latencyMs?: number;
   ttftMs?: number;
   isAwake?: boolean;
+  isMicListening?: boolean;
+  liveTranscript?: string;
   onVoiceCommand?: (action: VoiceCommandAction) => void;
 }
 
@@ -27,6 +29,8 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
   latencyMs,
   ttftMs,
   isAwake,
+  isMicListening = false,
+  liveTranscript = '',
   onVoiceCommand,
 }) => {
   const [inputText, setInputText] = useState('');
@@ -45,13 +49,37 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
 
   // Handle voice mic toggle with smart collision handling and barge-in
   const toggleListening = async () => {
+    setSpeechError(null);
+
     // 1. If assistant is speaking, clicking the mic immediately cuts off the speech (barge-in)
     if (isSpeaking) {
       speechService.stopSpeaking();
       return;
     }
 
-    // 2. Microphone is ALWAYS active: clicking the mic wakes up the assistant directly without needing to say "Asistente"
+    // 2. If microphone is not currently listening, request mic permission and start!
+    if (!speechService.getIsListening()) {
+      const granted = await speechService.requestMicrophoneAccess();
+      if (!granted) {
+        setSpeechError('Permiso de micrófono no otorgado. Habilítalo en tu navegador.');
+        return;
+      }
+      speechService.startContinuousListening({
+        assistantName: preferences.assistantName,
+        onWakeChange: (awake) => {
+          // Handled via App
+        },
+        onCommand: (action) => {
+          if (onVoiceCommand) onVoiceCommand(action);
+        },
+        onError: (err) => setSpeechError(err),
+      });
+      speechService.setAwakeState(true);
+      speechService.playChime('wake');
+      return;
+    }
+
+    // 3. If already listening, toggle awake state directly
     if (isAwake) {
       speechService.setAwakeState(false);
     } else {
@@ -106,8 +134,10 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
       {/* Top Status Bar with Clean Minimalist Latency */}
       <div className="w-full max-w-[680px] flex items-center justify-between mb-3 px-1 text-xs text-slate-400">
         <div className="flex items-center gap-2">
-          <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="font-medium text-slate-300">Voz Activa · Di "Asistente"</span>
+          <span className={`inline-block w-2.5 h-2.5 rounded-full ${isMicListening ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.6)]' : 'bg-amber-400 animate-ping'}`} />
+          <span className="font-medium text-slate-300">
+            {isMicListening ? 'Voz Activa · Di "Asistente"' : 'Haz clic en el micrófono para habilitar la voz'}
+          </span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -144,6 +174,10 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
                 <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                 <span>{speechError}</span>
               </p>
+            ) : liveTranscript ? (
+              <p className="text-[13px] text-emerald-400 font-medium tracking-wide flex items-center gap-1.5 animate-pulse">
+                <span>🎙️ Escuchando: "{liveTranscript}"</span>
+              </p>
             ) : (
               <p className="text-[13px] text-slate-400 italic tracking-wide">
                 {isSpeaking
@@ -152,13 +186,15 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
                   ? '¡Te escucho! Di tu consulta...'
                   : isProcessing
                   ? 'Generando respuesta en tiempo real...'
-                  : 'Siempre activo · Di "Asistente"'}
+                  : isMicListening
+                  ? 'Siempre activo · Di "Asistente"'
+                  : 'Haz clic en el micrófono para habilitar la voz'}
               </p>
             )}
-            {!speechError && (isAwake || isSpeaking || isProcessing) && (
+            {!speechError && (isAwake || isSpeaking || isProcessing || !!liveTranscript) && (
               <AudioWaveform
                 isActive={true}
-                type={isAwake ? 'listening' : isSpeaking ? 'speaking' : 'processing'}
+                type={isAwake || !!liveTranscript ? 'listening' : isSpeaking ? 'speaking' : 'processing'}
               />
             )}
           </div>
@@ -236,24 +272,30 @@ export const TouchKioskView: React.FC<TouchKioskViewProps> = ({
                 ? 'bg-rose-600 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse'
                 : isAwake
                 ? 'bg-rose-600 text-white shadow-[0_0_20px_rgba(239,68,68,0.5)] scale-105 ring-4 ring-rose-500/20'
-                : 'bg-slate-800/90 border border-emerald-500/40 text-emerald-400 hover:bg-slate-700 active:scale-95'
+                : isMicListening
+                ? 'bg-slate-800/90 border border-emerald-500/40 text-emerald-400 hover:bg-slate-700 active:scale-95'
+                : 'bg-amber-500/20 border border-amber-500/60 text-amber-400 hover:bg-amber-500/30 active:scale-95 animate-pulse'
             }`}
             title={
               isSpeaking
                 ? 'Asistente hablando · Clic para silenciar (Barge-in)'
                 : isAwake
                 ? 'Escuchando consulta activa'
-                : 'Micrófono siempre activo · Clic para despertar directamente'
+                : isMicListening
+                ? 'Micrófono activo · Di "Asistente" o haz clic para hablar'
+                : 'Haz clic aquí para conceder permiso y activar el micrófono'
             }
             aria-label="Micrófono"
           >
-            {!isAwake && !isSpeaking && (
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            {isMicListening && !isAwake && !isSpeaking && (
+              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
             )}
             {isSpeaking ? (
               <VolumeX className="w-6 h-6 animate-pulse text-white" />
             ) : isAwake ? (
               <MicOff className="w-6 h-6 animate-pulse" />
+            ) : !isMicListening ? (
+              <Mic className="w-6 h-6 animate-pulse text-amber-400" />
             ) : (
               <Mic className="w-6 h-6" />
             )}

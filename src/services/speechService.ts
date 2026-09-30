@@ -44,6 +44,7 @@ export class SpeechService {
   private onTranscriptCallback: ((text: string, isFinal: boolean) => void) | null = null;
   private onCommandCallback: ((command: VoiceCommandAction) => void) | null = null;
   private onWakeStateChange: ((isAwake: boolean) => void) | null = null;
+  private onListeningStateChange: ((isListening: boolean) => void) | null = null;
   private onErrorCallback: ((error: string) => void) | null = null;
   private onEndCallback: (() => void) | null = null;
   private onSpeakingStateChange: ((isSpeaking: boolean) => void) | null = null;
@@ -68,6 +69,14 @@ export class SpeechService {
 
   public setSpeakingStateCallback(callback: ((isSpeaking: boolean) => void) | null) {
     this.onSpeakingStateChange = callback;
+  }
+
+  public setListeningStateCallback(callback: ((isListening: boolean) => void) | null) {
+    this.onListeningStateChange = callback;
+  }
+
+  public getIsListening(): boolean {
+    return this.isListening;
   }
 
   /**
@@ -115,6 +124,13 @@ export class SpeechService {
     rec.lang = 'es-ES';
     rec.maxAlternatives = 1;
 
+    rec.onstart = () => {
+      this.isListening = true;
+      if (this.onListeningStateChange) {
+        this.onListeningStateChange(true);
+      }
+    };
+
     rec.onresult = (event: any) => {
       let interimTranscript = '';
       let finalTranscript = '';
@@ -138,21 +154,26 @@ export class SpeechService {
       if (this.isSpeaking) {
         const normalized = currentText.toLowerCase().replace(/[¿?¡!.,]/g, '').trim();
 
-        // Only interrupt if user explicitly speaks a deliberate stop command or calls 'Asistente'
+        // Check if user explicitly spoke a stop command
         const isExplicitStop = /\b(silencio|detente|detén|cállate|basta|alto|para ya|deja de hablar)\b/i.test(normalized);
-        const isWakeInterrupt = normalized.includes('asistente') || normalized.includes('asistente ia');
+        const isWakeInterrupt = /\b(asistente|asistenta|asistencia|asiste)\b/i.test(normalized) || 
+                                normalized.includes(this.assistantName.toLowerCase().trim());
 
-        if (isExplicitStop || isWakeInterrupt) {
+        if (isExplicitStop) {
           this.stopSpeaking();
           this.playChime('command');
-          if (isWakeInterrupt && this.onWakeStateChange) {
-            this.setAwakeState(true);
-          }
           return;
         }
 
-        // For all other sounds, ambient noise, coughs, or speaker bleed: IGNORE and keep speaking smoothly!
-        return;
+        if (isWakeInterrupt) {
+          this.stopSpeaking();
+          this.playChime('wake');
+          this.setAwakeState(true);
+          // Fall through so the words spoken with the wake word are not lost!
+        } else {
+          // Ambient noise or speaker feedback: ignore while speech is actively playing
+          return;
+        }
       }
 
       this.currentSessionText = currentText;
@@ -201,9 +222,13 @@ export class SpeechService {
       console.warn('Speech recognition warning:', event.error);
       let userMsg = 'Error en reconocimiento de voz';
       if (event.error === 'not-allowed') {
-        userMsg = 'Acceso al micrófono denegado. Permite el micrófono en tu navegador.';
+        userMsg = 'Permiso de micrófono no otorgado. Toca el icono de micrófono para habilitarlo.';
+        this.isListening = false;
+        if (this.onListeningStateChange) {
+          this.onListeningStateChange(false);
+        }
       } else if (event.error === 'network') {
-        userMsg = 'Error de conexión con el servicio de reconocimiento de voz.';
+        userMsg = 'Error de red en el servicio de voz.';
       }
 
       if (this.onErrorCallback) {
@@ -213,6 +238,9 @@ export class SpeechService {
 
     rec.onend = () => {
       this.isListening = false;
+      if (this.onListeningStateChange) {
+        this.onListeningStateChange(false);
+      }
 
       // In manual mode, if speech ended and we had captured text, trigger submit
       if (!this.isContinuousMode && this.currentSessionText.trim()) {
@@ -232,11 +260,26 @@ export class SpeechService {
               this.recognition = this.createRecognitionInstance(true);
               this.recognition?.start();
               this.isListening = true;
+              if (this.onListeningStateChange) {
+                this.onListeningStateChange(true);
+              }
             } catch (e) {
-              // Ignore restart collision
+              console.warn('Speech recognition restart delayed:', e);
+              this.restartTimer = setTimeout(() => {
+                if (this.isContinuousMode && !this.isListening) {
+                  try {
+                    this.recognition = this.createRecognitionInstance(true);
+                    this.recognition?.start();
+                    this.isListening = true;
+                    if (this.onListeningStateChange) {
+                      this.onListeningStateChange(true);
+                    }
+                  } catch (err) {}
+                }
+              }, 800);
             }
           }
-        }, 300);
+        }, 200);
       } else {
         if (this.onEndCallback) {
           this.onEndCallback();
@@ -424,10 +467,22 @@ export class SpeechService {
       return { command: { type: 'toggle_listening', enable: false }, isWakeWord: false, isGreeting: false, queryText: '' };
     }
 
-    // 2. Strict Wake Word Engine: ONLY trigger if sentence contains 'asistente' or configured assistant name
-    const wakeKeywords = ['asistente', 'asistente ia', name];
-    let matchedKeyword = '';
+    // 2. Robust Wake Word Engine: matches 'asistente' or configured assistant name
+    const cleanName = name.replace(/[¿?¡!.,]/g, '').trim();
+    const wakeKeywords = [
+      'asistente ia',
+      'asistente ya',
+      'asistente',
+      'asistenta',
+      'asistencia',
+      'asiste',
+      cleanName,
+    ].filter(Boolean);
 
+    // Sort descending by length so longer phrases match first
+    wakeKeywords.sort((a, b) => b.length - a.length);
+
+    let matchedKeyword = '';
     for (const kw of wakeKeywords) {
       if (text.includes(kw)) {
         matchedKeyword = kw;
@@ -435,21 +490,29 @@ export class SpeechService {
       }
     }
 
-    // If 'asistente' is NOT in the text, it is completely ignored when idle!
+    // If 'asistente' is NOT in the text:
     if (!matchedKeyword) {
       return { command: null, isWakeWord: false, isGreeting: false, queryText: '' };
     }
 
-    // If 'asistente' IS in the text:
+    // If 'asistente' IS in the text: extract query before or after
     const idx = text.indexOf(matchedKeyword);
     const before = text.slice(0, idx).trim();
-    let remainder = text.slice(idx + matchedKeyword.length).trim();
+    const after = text.slice(idx + matchedKeyword.length).trim();
 
-    // Remove leading words like 'hola', 'oye', 'hey', 'por favor', 'dime'
-    remainder = remainder.replace(/^(?:hola|oye|hey|ok|por favor|dime|puedes decirme|decime|consulta)\s+/i, '').trim();
+    // Remove filler conversational words from both ends
+    const cleanPreamble = (s: string) =>
+      s
+        .replace(/^(?:hola|oye|hey|ok|por favor|che|dime|decime|consulta|buenos días|buenas tardes|buenas noches)\s+/i, '')
+        .replace(/\s+(?:por favor|gracias)$/i, '')
+        .trim();
+
+    const cleanAfter = cleanPreamble(after);
+    const cleanBefore = cleanPreamble(before);
+    const query = cleanAfter || cleanBefore;
 
     // Check if remainder is empty (User said simply "Asistente" or "Hola Asistente")
-    const isOnlyWakeWord = !remainder || remainder.length < 2;
+    const isOnlyWakeWord = !query || query.length < 2;
 
     if (isOnlyWakeWord) {
       return {
@@ -460,12 +523,12 @@ export class SpeechService {
       };
     }
 
-    // User said "Asistente [consulta]"
+    // User said "Asistente [consulta]" or "[consulta], Asistente"
     return {
-      command: { type: 'query', prompt: remainder },
+      command: { type: 'query', prompt: query },
       isWakeWord: true,
       isGreeting: false,
-      queryText: remainder,
+      queryText: query,
     };
   }
 
@@ -476,8 +539,8 @@ export class SpeechService {
     const now = Date.now();
     const commandKey = command.type === 'query' ? command.prompt : command.type;
 
-    // Mutex debounce: drop exact duplicate command if fired within 800ms
-    if (this.lastExecutedText === commandKey && now - this.lastExecutedCommandTime < 800) {
+    // Mutex debounce: drop exact duplicate command if fired within 600ms
+    if (this.lastExecutedText === commandKey && now - this.lastExecutedCommandTime < 600) {
       return;
     }
 
@@ -494,7 +557,7 @@ export class SpeechService {
 
     // 1. Direct System Command (navigate, clear, stop speech)
     if (command && command.type !== 'query') {
-      if (isFinal || transcript.length > 6) {
+      if (isFinal || transcript.length > 5) {
         this.playChime('command');
         this.executeCommandSafely(command);
         this.setAwakeState(false);
@@ -517,10 +580,7 @@ export class SpeechService {
           this.setAwakeState(false);
           return;
         } else {
-          // Adaptive Turn-Taking VAD: 460ms of silence after a thought triggers immediately
-          const wordCount = queryText.split(/\s+/).length;
-          const turnDelay = wordCount >= 3 ? 460 : 620;
-
+          // Adaptive Turn-Taking VAD: 420ms of silence after speaking triggers prompt
           this.silenceTimer = setTimeout(() => {
             if (this.currentSessionText) {
               const parsed = this.parseCommandOrWakeWord(this.currentSessionText);
@@ -529,19 +589,15 @@ export class SpeechService {
                 this.setAwakeState(false);
               }
             }
-          }, turnDelay);
+          }, 420);
           return;
         }
       }
 
-      // Case B: User said ONLY "Asistente"
-      if (isGreeting && (isFinal || transcript.length >= 8)) {
-        this.speak('Dime, te escucho.', {
-          rate: 0.98,
-          onEnd: () => {
-            this.setAwakeState(true);
-          },
-        });
+      // Case B: User said ONLY "Asistente" (or "Hola Asistente")
+      if (isGreeting) {
+        // Immediate awake mode: already played wake chime, keeps awake for 8s to hear the user's question
+        this.setAwakeState(true);
         return;
       }
     } else if (this.isAwake && transcript.trim()) {
@@ -551,15 +607,12 @@ export class SpeechService {
         this.executeCommandSafely({ type: 'query', prompt: transcript.trim() });
         this.setAwakeState(false);
       } else {
-        const wordCount = transcript.trim().split(/\s+/).length;
-        const turnDelay = wordCount >= 3 ? 460 : 620;
-
         this.silenceTimer = setTimeout(() => {
           if (this.currentSessionText && this.isAwake) {
             this.executeCommandSafely({ type: 'query', prompt: this.currentSessionText.trim() });
             this.setAwakeState(false);
           }
-        }, turnDelay);
+        }, 450);
       }
     }
   }
@@ -752,14 +805,31 @@ export class SpeechService {
 
     this.currentUtterance = utterance;
 
+    // Prevent garbage collection bug in Chromium
+    (window as any).__speechUtterances = (window as any).__speechUtterances || [];
+    (window as any).__speechUtterances.push(utterance);
+
+    // Watchdog to guarantee isSpeaking never gets stuck
+    const maxDuration = Math.max(3000, textToSpeak.length * 150);
+    const watchdogTimer = setTimeout(() => {
+      if (this.currentUtterance === utterance) {
+        onFinish();
+      }
+    }, maxDuration);
+
     const onFinish = () => {
+      clearTimeout(watchdogTimer);
+      const arr = (window as any).__speechUtterances;
+      if (arr) {
+        const idx = arr.indexOf(utterance);
+        if (idx !== -1) arr.splice(idx, 1);
+      }
       this.currentUtterance = null;
-      // Natural 160ms conversational breath pause between clauses so sentences flow smoothly without rushing
       setTimeout(() => {
         if (this.isSpeaking) {
           this.playNextInQueue(options);
         }
-      }, 160);
+      }, 120);
     };
 
     utterance.onend = onFinish;
