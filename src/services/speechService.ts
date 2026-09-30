@@ -214,8 +214,8 @@ export class SpeechService {
     };
 
     rec.onerror = (event: any) => {
-      // Non-fatal events in continuous mode
-      if (event.error === 'no-speech' || event.error === 'audio-capture') {
+      // Non-fatal events in continuous mode — ignore silently
+      if (event.error === 'no-speech' || event.error === 'audio-capture' || event.error === 'aborted') {
         return;
       }
 
